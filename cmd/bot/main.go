@@ -19,10 +19,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	botApp, err := app.New(cfg)
+	botApp, err := app.New(ctx, cfg)
 	if err != nil {
 		panic(fmt.Errorf("failed to initialize bot: %w", err))
 	}
 
-	botApp.Start(ctx)
+	botApp.Start()
 }

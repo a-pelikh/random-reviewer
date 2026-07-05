@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS reviewers;
+DROP TABLE IF EXISTS chats;
+DROP TYPE IF EXISTS reset_types;

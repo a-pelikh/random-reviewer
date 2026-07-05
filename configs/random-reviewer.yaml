@@ -1,2 +1,10 @@
-BOT_TOKEN: ${BOT_TOKEN}
-BOT_API_URL: ${BOT_API_URL}
+bot:
+  token: ${BOT_TOKEN}
+  api_url: ${BOT_API_URL}
+
+postgres:
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  db: ${POSTGRES_DB}
+  host: ${POSTGRES_HOST}
+  port: ${POSTGRES_PORT}
