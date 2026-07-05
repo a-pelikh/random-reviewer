@@ -38,9 +38,13 @@ func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID) (core
 	panic("implement me")
 }
 
-func (s *serviceImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer) {
-	//TODO implement me
-	panic("implement me")
+func (s *serviceImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer) error {
+	err := s.repository.RemoveReviewer(ctx, reviewer)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *serviceImpl) SetReset(ctx context.Context, chat core.Chat) error {

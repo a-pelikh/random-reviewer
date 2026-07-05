@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	addCommand = "add"
+	addCommand    = "add"
+	removeCommand = "remove"
 )
 
 type Bot struct {
@@ -109,16 +110,15 @@ func (b *Bot) Start() {
 				slog.Error("match command", "payload", update.Payload, "error", err)
 				switch {
 				case errors.Is(err, core.ErrNoUserMentioned):
-					reply(update.Payload.Message(), "Не указан пользователь для добавления в ревьюеры")
+					reply(update.Payload.Message(), "Не указан пользователь для выполнения команды")
 				case errors.Is(err, core.ErrUserAlreadyAdded):
 					reply(update.Payload.Message(), "Пользователь уже является ревьюером в этом чате")
+				case errors.Is(err, core.ErrUserNotInReviewersList):
+					reply(update.Payload.Message(), "Пользователя нет в списке ревьюеров")
 				case err != nil:
 					reply(update.Payload.Message(), "Бот не может обработать ваше сообщение")
 				}
 			}
-			//if err := update.Payload.Message().Reply(fmt.Sprintf("@[%s], ревью плиз", me.User.ID)); err != nil {
-			//	slog.Error("send message error:", err)
-			//}
 		}
 	}
 
@@ -129,21 +129,50 @@ func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 	texts := strings.Split(payload.Message().Text, " ")
 	switch {
 	case slices.Contains(texts, addCommand):
-		userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
-		if err != nil {
-			return fmt.Errorf("invalid command: %w", err)
+		if err := b.add(payload); err != nil {
+			return fmt.Errorf("add command: %w", err)
 		}
-
-		err = b.service.AddReviewer(b.ctx, core.Reviewer{
-			ID:     userID,
-			ChatID: core.ChatID(payload.Chat.ID),
-		})
-		if err != nil {
-			return fmt.Errorf("add reviewer: %w", err)
+	case slices.Contains(texts, removeCommand):
+		if err := b.remove(payload); err != nil {
+			return fmt.Errorf("remove command: %w", err)
 		}
-
-		reply(payload.Message(), fmt.Sprintf("@[%s], вы успешно добавлены в ревьюеры", userID))
 	}
 
+	return nil
+}
+
+func (b *Bot) add(payload botgolang.EventPayload) error {
+	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	if err != nil {
+		return fmt.Errorf("invalid command: %w", err)
+	}
+
+	err = b.service.AddReviewer(b.ctx, core.Reviewer{
+		ID:     userID,
+		ChatID: core.ChatID(payload.Chat.ID),
+	})
+	if err != nil {
+		return fmt.Errorf("add reviewer: %w", err)
+	}
+
+	reply(payload.Message(), fmt.Sprintf("@[%s], вы добавлены в список ревьюеров", userID))
+	return nil
+}
+
+func (b *Bot) remove(payload botgolang.EventPayload) error {
+	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	if err != nil {
+		return fmt.Errorf("invalid command: %w", err)
+	}
+
+	err = b.service.RemoveReviewer(b.ctx, core.Reviewer{
+		ID:     userID,
+		ChatID: core.ChatID(payload.Chat.ID),
+	})
+	if err != nil {
+		return fmt.Errorf("remove reviewer: %w", err)
+	}
+
+	reply(payload.Message(), fmt.Sprintf("@[%s], вы удалены из списка ревьюеров", userID))
 	return nil
 }
