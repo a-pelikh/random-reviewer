@@ -7,7 +7,7 @@ CREATE TYPE reset_types AS ENUM (
 CREATE TABLE IF NOT EXISTS chats
 (
     chat_id VARCHAR(125) PRIMARY KEY,
-    reset   reset_types NOT NULL
+    reset   reset_types NOT NULL DEFAULT 'week'
 );
 
 CREATE TABLE IF NOT EXISTS reviewers
