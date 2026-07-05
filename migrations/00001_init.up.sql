@@ -17,5 +17,6 @@ CREATE TABLE IF NOT EXISTS reviewers
     PRIMARY KEY (user_id, chat_id),
     FOREIGN KEY (chat_id) REFERENCES chats (chat_id),
     weight      INTEGER      NOT NULL DEFAULT 0,
-    freeze_time TIMESTAMPTZ
+    freeze_time TIMESTAMPTZ,
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE
 );

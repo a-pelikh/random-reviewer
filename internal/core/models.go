@@ -18,6 +18,7 @@ type Reviewer struct {
 type Review struct {
 	ID             int64
 	ReviewerID     UserID
+	ChatID         ChatID
 	MessageID      MessageID
 	PrevReviewerID *UserID
 }

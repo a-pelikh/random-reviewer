@@ -75,8 +75,14 @@ func New(ctx context.Context, cfg *config.Config) (*Bot, error) {
 	})
 
 	repository := postgres.New(conn)
-
 	app.service = random_reviewer.New(repository)
+
+	//app.wg.Go(func() {
+	//	if err := app.service.Reset(ctx); err != nil {
+	//		slog.Warn("failed to reset chat", "error", err)
+	//	}
+	//})
+
 	return app, nil
 }
 
@@ -97,10 +103,12 @@ func getUserIDByMention(parts []botgolang.Part, botUserID string) (core.UserID, 
 	return zero, core.ErrNoUserMentioned
 }
 
-func reply(message *botgolang.Message, text string) {
+func reply(message *botgolang.Message, text string) error {
 	if err := message.Reply(text); err != nil {
 		slog.Error("failed to reply", "error", err)
+		return err
 	}
+	return nil
 }
 
 func (b *Bot) Start() {
@@ -109,14 +117,18 @@ func (b *Bot) Start() {
 			if err := b.matchCommand(update.Payload); err != nil {
 				slog.Error("match command", "payload", update.Payload, "error", err)
 				switch {
+				case errors.Is(err, core.ErrNoReviewersAvailable):
+					_ = reply(update.Payload.Message(), "Список ревьюеров пуст")
 				case errors.Is(err, core.ErrNoUserMentioned):
-					reply(update.Payload.Message(), "Не указан пользователь для выполнения команды")
+					_ = reply(update.Payload.Message(), "Не указан пользователь для выполнения команды")
 				case errors.Is(err, core.ErrUserAlreadyAdded):
-					reply(update.Payload.Message(), "Пользователь уже является ревьюером в этом чате")
+					_ = reply(update.Payload.Message(), "Пользователь уже является ревьюером в этом чате")
 				case errors.Is(err, core.ErrUserNotInReviewersList):
-					reply(update.Payload.Message(), "Пользователя нет в списке ревьюеров")
+					_ = reply(update.Payload.Message(), "Пользователя нет в списке ревьюеров")
+				case errors.Is(err, core.ErrUnknowCommand):
+					_ = reply(update.Payload.Message(), "Неизвестная команда, для отображения всех команд используйте команду help")
 				case err != nil:
-					reply(update.Payload.Message(), "Бот не может обработать ваше сообщение")
+					_ = reply(update.Payload.Message(), "Бот не может обработать ваше сообщение")
 				}
 			}
 		}
@@ -128,6 +140,10 @@ func (b *Bot) Start() {
 func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 	texts := strings.Split(payload.Message().Text, " ")
 	switch {
+	case len(strings.Split(strings.TrimSpace(payload.Message().Text), " ")) == 1:
+		if err := b.getReviewer(payload); err != nil {
+			return fmt.Errorf("get reviewer: %w", err)
+		}
 	case slices.Contains(texts, addCommand):
 		if err := b.add(payload); err != nil {
 			return fmt.Errorf("add command: %w", err)
@@ -136,6 +152,30 @@ func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 		if err := b.remove(payload); err != nil {
 			return fmt.Errorf("remove command: %w", err)
 		}
+	}
+
+	return core.ErrUnknowCommand
+}
+
+func (b *Bot) getReviewer(payload botgolang.EventPayload) error {
+	userID, err := b.service.GetReviewer(b.ctx, core.ChatID(payload.Chat.ID))
+	if err != nil {
+		return fmt.Errorf("get reviewer: %w", err)
+	}
+
+	msg := payload.Message()
+	err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", userID))
+	if err != nil {
+		return fmt.Errorf("reply: %w", err)
+	}
+
+	err = b.service.AssignReviewer(b.ctx, core.Review{
+		ReviewerID: userID,
+		ChatID:     core.ChatID(payload.Chat.ID),
+		MessageID:  core.MessageID(msg.ID),
+	})
+	if err != nil {
+		slog.Error("failed to assign reviewer", "error", err)
 	}
 
 	return nil
@@ -155,7 +195,7 @@ func (b *Bot) add(payload botgolang.EventPayload) error {
 		return fmt.Errorf("add reviewer: %w", err)
 	}
 
-	reply(payload.Message(), fmt.Sprintf("@[%s], вы добавлены в список ревьюеров", userID))
+	_ = reply(payload.Message(), fmt.Sprintf("@[%s], вы добавлены в список ревьюеров", userID))
 	return nil
 }
 
@@ -173,6 +213,6 @@ func (b *Bot) remove(payload botgolang.EventPayload) error {
 		return fmt.Errorf("remove reviewer: %w", err)
 	}
 
-	reply(payload.Message(), fmt.Sprintf("@[%s], вы удалены из списка ревьюеров", userID))
+	_ = reply(payload.Message(), fmt.Sprintf("@[%s], вы удалены из списка ревьюеров", userID))
 	return nil
 }

@@ -28,14 +28,26 @@ func (s *serviceImpl) AddReviewer(ctx context.Context, reviewer core.Reviewer) e
 	return nil
 }
 
+func (s *serviceImpl) AssignReviewer(ctx context.Context, review core.Review) error {
+	return s.repository.AssignReviewer(ctx, review)
+}
+
 func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID, messageID core.MessageID) (core.UserID, error) {
 	//TODO implement me
 	panic("implement me")
 }
 
 func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID) (core.UserID, error) {
-	//TODO implement me
-	panic("implement me")
+	reviewers, err := s.repository.GetAvailableReviewers(ctx, chatID)
+	if err != nil {
+		var zero core.UserID
+		return zero, err
+	}
+	if len(reviewers) == 0 {
+		return "", core.ErrNoReviewersAvailable
+	}
+
+	return s.pickReviewer(reviewers), nil
 }
 
 func (s *serviceImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer) error {
@@ -49,6 +61,11 @@ func (s *serviceImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer
 
 func (s *serviceImpl) SetReset(ctx context.Context, chat core.Chat) error {
 	//TODO implement me
+	panic("implement me")
+}
+
+func (s *serviceImpl) Reset(ctx context.Context) error {
+	//TODO: implement me
 	panic("implement me")
 }
 
