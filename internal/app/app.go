@@ -44,7 +44,7 @@ type Bot struct {
 
 func New(ctx context.Context, cfg *config.Config) (*Bot, error) {
 	app := new(Bot)
-	bot, err := botgolang.NewBot(cfg.Bot.Token, botgolang.BotApiURL(cfg.Bot.ApiURL), botgolang.BotDebug(true))
+	bot, err := botgolang.NewBot(cfg.Bot.Token, botgolang.BotApiURL(cfg.Bot.ApiURL))
 	if err != nil {
 		return nil, fmt.Errorf("new bot: %w", err)
 	}
