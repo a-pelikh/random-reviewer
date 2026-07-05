@@ -3,6 +3,7 @@ package random_reviewer
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"math/rand"
 	"slices"
 
@@ -32,9 +33,26 @@ func (s *serviceImpl) AssignReviewer(ctx context.Context, review core.Review) er
 	return s.repository.AssignReviewer(ctx, review)
 }
 
-func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID, messageID core.MessageID) (core.UserID, error) {
-	//TODO implement me
-	panic("implement me")
+func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID, messageID core.MessageID) (core.UserID, core.UserID, error) {
+	reviewers, err := s.repository.GetAvailableReviewers(ctx, chatID)
+	if err != nil {
+		return "", "", fmt.Errorf("get available reviewers: %w", err)
+	}
+
+	prevReviewer, err := s.repository.GetActualReviewer(ctx, messageID)
+	if err != nil {
+		return "", "", fmt.Errorf("get actual reviewer: %w", err)
+	}
+
+	reviewers = slices.DeleteFunc(reviewers, func(r core.Reviewer) bool {
+		return r.ID == prevReviewer
+	})
+
+	if len(reviewers) == 0 {
+		return "", "", core.ErrNoAnotherReviewersAllowed
+	}
+
+	return s.pickReviewer(reviewers), prevReviewer, nil
 }
 
 func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID) (core.UserID, error) {

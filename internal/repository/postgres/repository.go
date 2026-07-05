@@ -162,6 +162,12 @@ func (r *repositoryImpl) AssignReviewer(ctx context.Context, review core.Review)
 		return fmt.Errorf("could not insert review: %w", err)
 	}
 
+	if review.PrevReviewerID != nil {
+		if err = r.deincrementWeightTx(ctx, tx, review.ChatID, *review.PrevReviewerID); err != nil {
+			return fmt.Errorf("could not deincrement weight: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -194,6 +200,32 @@ func (r *repositoryImpl) insertReviewTx(ctx context.Context, tx *sql.Tx, review 
 	_, err := tx.ExecContext(ctx, query, review.ReviewerID, review.ChatID, review.MessageID, review.PrevReviewerID)
 	if err != nil {
 		return fmt.Errorf("could not insert review: %w", err)
+	}
+
+	return nil
+}
+
+func (r *repositoryImpl) GetActualReviewer(ctx context.Context, messageID core.MessageID) (core.UserID, error) {
+	const query = `
+	SELECT reviewer_id FROM reviews WHERE message_id = $1;
+`
+	var userID core.UserID
+	err := r.db.QueryRowContext(ctx, query, messageID).Scan(&userID)
+	if err != nil {
+		return "", fmt.Errorf("could not get actual reviewer: %w", err)
+	}
+
+	return userID, nil
+}
+
+func (r *repositoryImpl) deincrementWeightTx(ctx context.Context, tx *sql.Tx, chatID core.ChatID, userID core.UserID) error {
+	const query = `
+	UPDATE reviewers SET weight = GREATEST(weight - 1, 0)
+	WHERE chat_id = $1 AND user_id = $2;
+`
+	_, err := tx.ExecContext(ctx, query, chatID, userID)
+	if err != nil {
+		return fmt.Errorf("could not deincrement weight: %w", err)
 	}
 
 	return nil
