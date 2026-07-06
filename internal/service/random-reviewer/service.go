@@ -12,24 +12,44 @@ import (
 
 type serviceImpl struct {
 	repository core.ReviewersRepository
+	hasher     *hasher[core.UserID]
 }
 
-func New(repository core.ReviewersRepository) core.ReviewersService {
+func New(repository core.ReviewersRepository, secret string) (core.ReviewersService, error) {
+	hash, err := newHasher[core.UserID](secret)
+	if err != nil {
+		return nil, fmt.Errorf("new hasher: %w", err)
+	}
+
 	return &serviceImpl{
 		repository: repository,
-	}
+		hasher:     hash,
+	}, nil
 }
 
 func (s *serviceImpl) AddReviewer(ctx context.Context, reviewer core.Reviewer) error {
-	err := s.repository.AddReviewer(ctx, reviewer)
+	var err error
+	reviewer.ID, err = s.hasher.Encode(reviewer.ID)
 	if err != nil {
-		return err
+		return fmt.Errorf("hash encode: %w", err)
 	}
-
-	return nil
+	return s.repository.AddReviewer(ctx, reviewer)
 }
 
 func (s *serviceImpl) AssignReviewer(ctx context.Context, review core.Review) error {
+	var err error
+	review.ReviewerID, err = s.hasher.Encode(review.ReviewerID)
+	if err != nil {
+		return fmt.Errorf("hash encode reviewer: %w", err)
+	}
+
+	if review.PrevReviewerID != nil {
+		*review.PrevReviewerID, err = s.hasher.Encode(*review.PrevReviewerID)
+		if err != nil {
+			return fmt.Errorf("hash encode prev reviewer: %w", err)
+		}
+	}
+
 	return s.repository.AssignReviewer(ctx, review)
 }
 
@@ -52,7 +72,18 @@ func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID
 		return "", "", core.ErrNoAnotherReviewersAllowed
 	}
 
-	return s.pickReviewer(reviewers), prevReviewer, nil
+	prevReviewer, err = s.hasher.Decode(prevReviewer)
+	if err != nil {
+		return "", "", fmt.Errorf("decode previous reviewer: %w", err)
+	}
+
+	reviewer := s.pickReviewer(reviewers)
+	reviewer, err = s.hasher.Decode(reviewer)
+	if err != nil {
+		return "", "", fmt.Errorf("decode reviewer: %w", err)
+	}
+
+	return reviewer, prevReviewer, nil
 }
 
 func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID) (core.UserID, error) {
@@ -65,16 +96,22 @@ func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID) (core
 		return "", core.ErrNoReviewersAvailable
 	}
 
-	return s.pickReviewer(reviewers), nil
+	reviewer := s.pickReviewer(reviewers)
+	reviewer, err = s.hasher.Decode(reviewer)
+	if err != nil {
+		return "", fmt.Errorf("decode reviewer: %w", err)
+	}
+
+	return reviewer, nil
 }
 
 func (s *serviceImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer) error {
-	err := s.repository.RemoveReviewer(ctx, reviewer)
+	var err error
+	reviewer.ID, err = s.hasher.Encode(reviewer.ID)
 	if err != nil {
-		return err
+		return fmt.Errorf("hash encode: %w", err)
 	}
-
-	return nil
+	return s.repository.RemoveReviewer(ctx, reviewer)
 }
 
 func (s *serviceImpl) SetReset(ctx context.Context, chat core.Chat) error {

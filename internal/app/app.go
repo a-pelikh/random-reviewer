@@ -84,8 +84,12 @@ func New(ctx context.Context, cfg *config.Config) (*Bot, error) {
 	})
 
 	repository := postgres.New(conn)
-	app.service = random_reviewer.New(repository)
 
+	service, err := random_reviewer.New(repository, cfg.Bot.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("new service: %w", err)
+	}
+	app.service = service
 	//app.wg.Go(func() {
 	//	if err := app.service.Reset(ctx); err != nil {
 	//		slog.Warn("failed to reset chat", "error", err)

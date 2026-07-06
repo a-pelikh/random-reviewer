@@ -17,6 +17,7 @@ type Config struct {
 type Bot struct {
 	Token  string `yaml:"token"`
 	ApiURL string `yaml:"api_url"`
+	Secret string `yaml:"secret"`
 }
 
 type Postgres struct {
