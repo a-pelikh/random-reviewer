@@ -168,16 +168,15 @@ func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 	switch {
 	case slices.Contains(texts, helpCommand):
 		return reply(payload.Message(), helpText)
-	case len(strings.Split(strings.TrimSpace(payload.Message().Text), " ")) == 1:
-		return b.getReviewer(payload)
 	case slices.Contains(texts, rerollCommand):
 		return b.reroll(payload)
 	case slices.Contains(texts, addCommand):
 		return b.add(payload)
 	case slices.Contains(texts, removeCommand):
 		return b.remove(payload)
+	default:
+		return b.getReviewer(payload)
 	}
-	return core.ErrUnknowCommand
 }
 
 func (b *Bot) getReviewer(payload botgolang.EventPayload) error {
