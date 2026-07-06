@@ -12,6 +12,12 @@ import (
 type Config struct {
 	Bot      Bot      `yaml:"bot"`
 	Postgres Postgres `yaml:"postgres"`
+	Storage  Storage  `yaml:"storage"`
+}
+
+type Storage struct {
+	Type string `yaml:"type"` // "postgres" or "fs"
+	Path string `yaml:"path"` // path to file, only for "fs"
 }
 
 type Bot struct {

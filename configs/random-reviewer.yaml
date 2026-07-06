@@ -3,6 +3,10 @@ bot:
   api_url: ${BOT_API_URL}
   secret: ${BOT_SECRET}
 
+storage:
+  type: ${STORAGE_TYPE} # "fs" or "postgres" (default: postgres)
+  path: ${STORAGE_PATH} # path to JSON file, only for "fs" (default: data.json)
+
 postgres:
   user: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}

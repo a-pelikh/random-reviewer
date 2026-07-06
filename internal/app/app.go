@@ -13,8 +13,9 @@ import (
 	"randomreviewer/internal/config"
 	"randomreviewer/internal/core"
 	"randomreviewer/internal/migrations"
+	"randomreviewer/internal/repository/fs"
 	"randomreviewer/internal/repository/postgres"
-	"randomreviewer/internal/service/random-reviewer"
+	random_reviewer "randomreviewer/internal/service/random-reviewer"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	botgolang "github.com/mail-ru-im/bot-golang"
@@ -52,38 +53,48 @@ func New(ctx context.Context, cfg *config.Config) (*Bot, error) {
 	app.ctx = ctx
 	slog.Info("bot started")
 
-	migConn, err := sql.Open("pgx", cfg.Postgres.DSN())
-	if err != nil {
-		return nil, fmt.Errorf("open postgres: %w", err)
-	}
-
-	if err := migConn.Ping(); err != nil {
-		return nil, fmt.Errorf("ping postgres: %w", err)
-	}
-
-	if err := migrations.Run(migConn); err != nil {
-		return nil, fmt.Errorf("apply migrations: %w", err)
-	}
-	slog.Info("applied migrations")
-
-	conn, err := sql.Open("pgx", cfg.Postgres.DSN())
-	if err != nil {
-		return nil, fmt.Errorf("open postgres: %w", err)
-	}
-
-	if err := conn.Ping(); err != nil {
-		return nil, fmt.Errorf("ping postgres: %w", err)
-	}
-	slog.Info("connected to postgres")
-
-	app.wg.Go(func() {
-		<-ctx.Done()
-		if err := conn.Close(); err != nil {
-			slog.Warn("failed to close postgres connection", "error", err)
+	var repository core.ReviewersRepository
+	if cfg.Storage.Type == "fs" {
+		path := cfg.Storage.Path
+		if path == "" {
+			path = "data.json"
 		}
-	})
+		repository = fs.New(path)
+		slog.Info("using fs storage", "path", path)
+	} else {
+		migConn, err := sql.Open("pgx", cfg.Postgres.DSN())
+		if err != nil {
+			return nil, fmt.Errorf("open postgres: %w", err)
+		}
 
-	repository := postgres.New(conn)
+		if err := migConn.Ping(); err != nil {
+			return nil, fmt.Errorf("ping postgres: %w", err)
+		}
+
+		if err := migrations.Run(migConn); err != nil {
+			return nil, fmt.Errorf("apply migrations: %w", err)
+		}
+		slog.Info("applied migrations")
+
+		conn, err := sql.Open("pgx", cfg.Postgres.DSN())
+		if err != nil {
+			return nil, fmt.Errorf("open postgres: %w", err)
+		}
+
+		if err := conn.Ping(); err != nil {
+			return nil, fmt.Errorf("ping postgres: %w", err)
+		}
+		slog.Info("connected to postgres")
+
+		app.wg.Go(func() {
+			<-ctx.Done()
+			if err := conn.Close(); err != nil {
+				slog.Warn("failed to close postgres connection", "error", err)
+			}
+		})
+
+		repository = postgres.New(conn)
+	}
 
 	service, err := random_reviewer.New(repository, cfg.Bot.Secret)
 	if err != nil {
