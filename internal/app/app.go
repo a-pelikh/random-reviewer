@@ -180,7 +180,7 @@ func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 }
 
 func (b *Bot) getReviewer(payload botgolang.EventPayload) error {
-	userID, err := b.service.GetReviewer(b.ctx, core.ChatID(payload.Chat.ID))
+	userID, err := b.service.GetReviewer(b.ctx, core.ChatID(payload.Chat.ID), core.UserID(payload.From.ID))
 	if err != nil {
 		return fmt.Errorf("get reviewer: %w", err)
 	}
@@ -216,7 +216,7 @@ func (b *Bot) reroll(payload botgolang.EventPayload) error {
 		return reply(payload.Message(), "Команда reroll должна быть реплаем на сообщение бота")
 	}
 
-	nextUserID, prevUserID, err := b.service.RerollLastReviewer(b.ctx, core.ChatID(payload.Chat.ID), core.MessageID(replyMsgID))
+	nextUserID, prevUserID, err := b.service.RerollLastReviewer(b.ctx, core.ChatID(payload.Chat.ID), core.MessageID(replyMsgID), core.UserID(payload.From.ID))
 	if err != nil {
 		return fmt.Errorf("reroll reviewer: %w", err)
 	}

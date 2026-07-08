@@ -53,7 +53,7 @@ func (s *serviceImpl) AssignReviewer(ctx context.Context, review core.Review) er
 	return s.repository.AssignReviewer(ctx, review)
 }
 
-func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID, messageID core.MessageID) (core.UserID, core.UserID, error) {
+func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID, messageID core.MessageID, requesterID core.UserID) (core.UserID, core.UserID, error) {
 	reviewers, err := s.repository.GetAvailableReviewers(ctx, chatID)
 	if err != nil {
 		return "", "", fmt.Errorf("get available reviewers: %w", err)
@@ -64,8 +64,13 @@ func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID
 		return "", "", fmt.Errorf("get actual reviewer: %w", err)
 	}
 
+	hashedRequesterID, err := s.hasher.Encode(requesterID)
+	if err != nil {
+		return "", "", fmt.Errorf("hash encode requester: %w", err)
+	}
+
 	reviewers = slices.DeleteFunc(reviewers, func(r core.Reviewer) bool {
-		return r.ID == prevReviewer
+		return r.ID == prevReviewer || r.ID == hashedRequesterID
 	})
 
 	if len(reviewers) == 0 {
@@ -86,12 +91,22 @@ func (s *serviceImpl) RerollLastReviewer(ctx context.Context, chatID core.ChatID
 	return reviewer, prevReviewer, nil
 }
 
-func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID) (core.UserID, error) {
+func (s *serviceImpl) GetReviewer(ctx context.Context, chatID core.ChatID, requesterID core.UserID) (core.UserID, error) {
 	reviewers, err := s.repository.GetAvailableReviewers(ctx, chatID)
 	if err != nil {
 		var zero core.UserID
 		return zero, err
 	}
+
+	hashedRequesterID, err := s.hasher.Encode(requesterID)
+	if err != nil {
+		return "", fmt.Errorf("hash encode requester: %w", err)
+	}
+
+	reviewers = slices.DeleteFunc(reviewers, func(r core.Reviewer) bool {
+		return r.ID == hashedRequesterID
+	})
+
 	if len(reviewers) == 0 {
 		return "", core.ErrNoReviewersAvailable
 	}
