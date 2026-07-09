@@ -20,10 +20,11 @@ type reviewerRecord struct {
 }
 
 type reviewRecord struct {
-	ReviewerID     core.UserID    `json:"reviewer_id"`
-	ChatID         core.ChatID    `json:"chat_id"`
-	MessageID      core.MessageID `json:"message_id"`
-	PrevReviewerID *core.UserID   `json:"prev_reviewer_id,omitempty"`
+	ReviewerID    core.UserID     `json:"reviewer_id,omitempty"`
+	ChatID        core.ChatID     `json:"chat_id"`
+	MessageID     core.MessageID  `json:"message_id"`
+	PrevMessageID *core.MessageID `json:"prev_message_id,omitempty"`
+	RootMessageID core.MessageID  `json:"root_message_id"`
 }
 
 type storage struct {
@@ -139,22 +140,46 @@ func (r *repositoryImpl) GetAvailableReviewers(_ context.Context, chatID core.Ch
 	return reviewers, nil
 }
 
-func (r *repositoryImpl) GetActualReviewer(_ context.Context, messageID core.MessageID) (core.UserID, error) {
+func (r *repositoryImpl) GetChainReviewers(_ context.Context, messageID core.MessageID) (core.MessageID, []core.UserID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	s, err := r.load()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
+	// Find the root: messageID can be a message_id or a root_message_id in reviews.
+	var rootMsgID core.MessageID
+	found := false
 	for _, rec := range s.Reviews {
 		if rec.MessageID == messageID {
-			return rec.ReviewerID, nil
+			rootMsgID = rec.RootMessageID
+			found = true
+			break
+		}
+	}
+	if !found {
+		for _, rec := range s.Reviews {
+			if rec.RootMessageID == messageID {
+				rootMsgID = messageID
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return "", nil, core.ErrNotInChain
+	}
+
+	var reviewerIDs []core.UserID
+	for _, rec := range s.Reviews {
+		if rec.RootMessageID == rootMsgID && rec.ReviewerID != "" {
+			reviewerIDs = append(reviewerIDs, rec.ReviewerID)
 		}
 	}
 
-	return "", fmt.Errorf("no review found for message %s", messageID)
+	return rootMsgID, reviewerIDs, nil
 }
 
 func (r *repositoryImpl) AssignReviewer(_ context.Context, review core.Review) error {
@@ -166,22 +191,33 @@ func (r *repositoryImpl) AssignReviewer(_ context.Context, review core.Review) e
 		return err
 	}
 
-	for i, rec := range s.Reviewers {
-		if rec.ChatID == review.ChatID && rec.ID == review.ReviewerID {
-			s.Reviewers[i].Weight++
+	if review.ReviewerID != "" {
+		for i, rec := range s.Reviewers {
+			if rec.ChatID == review.ChatID && rec.ID == review.ReviewerID {
+				s.Reviewers[i].Weight++
+			}
 		}
-		if review.PrevReviewerID != nil && rec.ChatID == review.ChatID && rec.ID == *review.PrevReviewerID {
-			if s.Reviewers[i].Weight > 0 {
-				s.Reviewers[i].Weight--
+
+		if review.PrevMessageID != nil {
+			for _, rec := range s.Reviews {
+				if rec.MessageID == *review.PrevMessageID && rec.ReviewerID != "" {
+					for i, rev := range s.Reviewers {
+						if rev.ChatID == review.ChatID && rev.ID == rec.ReviewerID && s.Reviewers[i].Weight > 0 {
+							s.Reviewers[i].Weight--
+						}
+					}
+					break
+				}
 			}
 		}
 	}
 
 	s.Reviews = append(s.Reviews, reviewRecord{
-		ReviewerID:     review.ReviewerID,
-		ChatID:         review.ChatID,
-		MessageID:      review.MessageID,
-		PrevReviewerID: review.PrevReviewerID,
+		ReviewerID:    review.ReviewerID,
+		ChatID:        review.ChatID,
+		MessageID:     review.MessageID,
+		PrevMessageID: review.PrevMessageID,
+		RootMessageID: review.RootMessageID,
 	})
 
 	return r.save(s)

@@ -24,14 +24,12 @@ import (
 const (
 	addCommand    = "add"
 	removeCommand = "remove"
-	rerollCommand = "reroll"
 	helpCommand   = "help"
 
 	helpText = `Команды:
 • @bot – выбрать ревьюера
 • @bot add @user – добавить ревьюера
 • @bot remove @user – удалить ревьюера
-• @bot reroll – переназначить ревьюера (реплай на сообщение бота)
 • @bot help – список команд`
 )
 
@@ -169,37 +167,94 @@ func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 	switch {
 	case slices.Contains(texts, helpCommand):
 		return reply(payload.Message(), helpText)
-	case slices.Contains(texts, rerollCommand):
-		return b.reroll(payload)
 	case slices.Contains(texts, addCommand):
 		return b.add(payload)
 	case slices.Contains(texts, removeCommand):
 		return b.remove(payload)
 	default:
+		if replyMsgID, ok := getReplyMsgID(payload.Parts); ok {
+			return b.handleReply(payload, core.MessageID(replyMsgID))
+		}
 		return b.getReviewer(payload)
 	}
 }
 
-func (b *Bot) getReviewer(payload botgolang.EventPayload) error {
-	userID, err := b.service.GetReviewer(b.ctx, core.ChatID(payload.Chat.ID), core.UserID(payload.From.ID))
+func (b *Bot) handleReply(payload botgolang.EventPayload, replyMsgID core.MessageID) error {
+	requesterID := core.UserID(payload.From.ID)
+	chatID := core.ChatID(payload.Chat.ID)
+
+	nextUserID, rootMsgID, err := b.service.RerollReview(b.ctx, chatID, replyMsgID, requesterID)
+	if errors.Is(err, core.ErrNotInChain) {
+		return b.assignInitial(payload, replyMsgID)
+	}
 	if err != nil {
-		return fmt.Errorf("get reviewer: %w", err)
+		return fmt.Errorf("reroll review: %w", err)
 	}
 
 	msg := payload.Message()
-	if err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", userID)); err != nil {
+	if err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", nextUserID)); err != nil {
 		return fmt.Errorf("reply: %w", err)
 	}
 
+	botMsgID := core.MessageID(msg.ID)
 	if err = b.service.AssignReviewer(b.ctx, core.Review{
-		ReviewerID: userID,
-		ChatID:     core.ChatID(payload.Chat.ID),
-		MessageID:  core.MessageID(msg.ID),
+		ReviewerID:    nextUserID,
+		ChatID:        chatID,
+		MessageID:     botMsgID,
+		PrevMessageID: &replyMsgID,
+		RootMessageID: rootMsgID,
 	}); err != nil {
 		slog.Error("failed to assign reviewer", "error", err)
 	}
 
 	return nil
+}
+
+// assignInitial selects a reviewer for the first time, stores the trigger message
+// as a null-reviewer anchor and the bot response as the actual review.
+// rootMsgID is the root of the chain (M0): for standalone calls it equals the trigger
+// message ID; for reply-to-M0 calls it is the replied-to message ID.
+func (b *Bot) assignInitial(payload botgolang.EventPayload, rootMsgID core.MessageID) error {
+	chatID := core.ChatID(payload.Chat.ID)
+
+	userID, err := b.service.GetReviewer(b.ctx, chatID, core.UserID(payload.From.ID))
+	if err != nil {
+		return fmt.Errorf("get reviewer: %w", err)
+	}
+
+	msg := payload.Message()
+	triggerMsgID := core.MessageID(msg.ID) // M0 (standalone) or M1 (reply case)
+
+	if err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", userID)); err != nil {
+		return fmt.Errorf("reply: %w", err)
+	}
+
+	botMsgID := core.MessageID(msg.ID) // M2 (bot response, after reply)
+
+	if err = b.service.AssignReviewer(b.ctx, core.Review{
+		ChatID:        chatID,
+		MessageID:     triggerMsgID,
+		RootMessageID: rootMsgID,
+	}); err != nil {
+		slog.Error("failed to store anchor", "error", err)
+	}
+
+	if err = b.service.AssignReviewer(b.ctx, core.Review{
+		ReviewerID:    userID,
+		ChatID:        chatID,
+		MessageID:     botMsgID,
+		PrevMessageID: &triggerMsgID,
+		RootMessageID: rootMsgID,
+	}); err != nil {
+		slog.Error("failed to assign reviewer", "error", err)
+	}
+
+	return nil
+}
+
+func (b *Bot) getReviewer(payload botgolang.EventPayload) error {
+	rootMsgID := core.MessageID(payload.Message().ID)
+	return b.assignInitial(payload, rootMsgID)
 }
 
 func getReplyMsgID(parts []botgolang.Part) (string, bool) {
@@ -209,34 +264,6 @@ func getReplyMsgID(parts []botgolang.Part) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func (b *Bot) reroll(payload botgolang.EventPayload) error {
-	replyMsgID, ok := getReplyMsgID(payload.Parts)
-	if !ok {
-		return reply(payload.Message(), "Команда reroll должна быть реплаем на сообщение бота")
-	}
-
-	nextUserID, prevUserID, err := b.service.RerollLastReviewer(b.ctx, core.ChatID(payload.Chat.ID), core.MessageID(replyMsgID), core.UserID(payload.From.ID))
-	if err != nil {
-		return fmt.Errorf("reroll reviewer: %w", err)
-	}
-
-	msg := payload.Message()
-	if err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", nextUserID)); err != nil {
-		return fmt.Errorf("reply: %w", err)
-	}
-
-	if err = b.service.AssignReviewer(b.ctx, core.Review{
-		ReviewerID:     nextUserID,
-		ChatID:         core.ChatID(payload.Chat.ID),
-		MessageID:      core.MessageID(msg.ID),
-		PrevReviewerID: &prevUserID,
-	}); err != nil {
-		slog.Error("failed to assign reviewer", "error", err)
-	}
-
-	return nil
 }
 
 func (b *Bot) add(payload botgolang.EventPayload) error {

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -154,18 +155,20 @@ func (r *repositoryImpl) AssignReviewer(ctx context.Context, review core.Review)
 		}
 	}()
 
-	if err = r.incrementWeightTx(ctx, tx, review.ChatID, review.ReviewerID); err != nil {
-		return fmt.Errorf("could not increment weight: %w", err)
+	if review.ReviewerID != "" {
+		if err = r.incrementWeightTx(ctx, tx, review.ChatID, review.ReviewerID); err != nil {
+			return fmt.Errorf("could not increment weight: %w", err)
+		}
+
+		if review.PrevMessageID != nil {
+			if err = r.deincrementWeightByMessageTx(ctx, tx, review.ChatID, *review.PrevMessageID); err != nil {
+				return fmt.Errorf("could not deincrement weight: %w", err)
+			}
+		}
 	}
 
 	if err = r.insertReviewTx(ctx, tx, review); err != nil {
 		return fmt.Errorf("could not insert review: %w", err)
-	}
-
-	if review.PrevReviewerID != nil {
-		if err = r.deincrementWeightTx(ctx, tx, review.ChatID, *review.PrevReviewerID); err != nil {
-			return fmt.Errorf("could not deincrement weight: %w", err)
-		}
 	}
 
 	return nil
@@ -194,10 +197,14 @@ func (r *repositoryImpl) incrementWeightTx(ctx context.Context, tx *sql.Tx, chat
 
 func (r *repositoryImpl) insertReviewTx(ctx context.Context, tx *sql.Tx, review core.Review) error {
 	const query = `
-	INSERT INTO reviews (reviewer_id, chat_id, message_id, prev_reviewer_id)
-	VALUES ($1, $2, $3, $4);
+	INSERT INTO reviews (reviewer_id, chat_id, message_id, prev_message_id, root_message_id)
+	VALUES ($1, $2, $3, $4, $5);
 `
-	_, err := tx.ExecContext(ctx, query, review.ReviewerID, review.ChatID, review.MessageID, review.PrevReviewerID)
+	var reviewerID sql.NullString
+	if review.ReviewerID != "" {
+		reviewerID = sql.NullString{String: string(review.ReviewerID), Valid: true}
+	}
+	_, err := tx.ExecContext(ctx, query, reviewerID, review.ChatID, review.MessageID, review.PrevMessageID, review.RootMessageID)
 	if err != nil {
 		return fmt.Errorf("could not insert review: %w", err)
 	}
@@ -205,25 +212,58 @@ func (r *repositoryImpl) insertReviewTx(ctx context.Context, tx *sql.Tx, review 
 	return nil
 }
 
-func (r *repositoryImpl) GetActualReviewer(ctx context.Context, messageID core.MessageID) (core.UserID, error) {
-	const query = `
-	SELECT reviewer_id FROM reviews WHERE message_id = $1;
-`
-	var userID core.UserID
-	err := r.db.QueryRowContext(ctx, query, messageID).Scan(&userID)
+func (r *repositoryImpl) GetChainReviewers(ctx context.Context, messageID core.MessageID) (core.MessageID, []core.UserID, error) {
+	// Find the root message ID: messageID can be a direct message_id or a root_message_id of some chain.
+	var rootMsgID string
+	const findRootQuery = `
+		(SELECT root_message_id FROM reviews WHERE message_id = $1 LIMIT 1)
+		UNION ALL
+		(SELECT root_message_id FROM reviews WHERE root_message_id = $1 LIMIT 1)
+		LIMIT 1;
+	`
+	err := r.db.QueryRowContext(ctx, findRootQuery, messageID).Scan(&rootMsgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, core.ErrNotInChain
+	}
 	if err != nil {
-		return "", fmt.Errorf("could not get actual reviewer: %w", err)
+		return "", nil, fmt.Errorf("could not find chain root: %w", err)
 	}
 
-	return userID, nil
+	const getReviewersQuery = `
+		SELECT reviewer_id FROM reviews
+		WHERE root_message_id = $1 AND reviewer_id IS NOT NULL;
+	`
+	rows, err := r.db.QueryContext(ctx, getReviewersQuery, rootMsgID)
+	if err != nil {
+		return "", nil, fmt.Errorf("could not query chain reviewers: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Warn("could not close rows", "error", err)
+		}
+	}()
+
+	var reviewerIDs []core.UserID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", nil, fmt.Errorf("could not scan reviewer id: %w", err)
+		}
+		reviewerIDs = append(reviewerIDs, core.UserID(id))
+	}
+	if err := rows.Err(); err != nil {
+		return "", nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return core.MessageID(rootMsgID), reviewerIDs, nil
 }
 
-func (r *repositoryImpl) deincrementWeightTx(ctx context.Context, tx *sql.Tx, chatID core.ChatID, userID core.UserID) error {
+func (r *repositoryImpl) deincrementWeightByMessageTx(ctx context.Context, tx *sql.Tx, chatID core.ChatID, prevMessageID core.MessageID) error {
 	const query = `
 	UPDATE reviewers SET weight = GREATEST(weight - 1, 0)
-	WHERE chat_id = $1 AND user_id = $2;
+	WHERE chat_id = $1 AND user_id = (SELECT reviewer_id FROM reviews WHERE message_id = $2);
 `
-	_, err := tx.ExecContext(ctx, query, chatID, userID)
+	_, err := tx.ExecContext(ctx, query, chatID, prevMessageID)
 	if err != nil {
 		return fmt.Errorf("could not deincrement weight: %w", err)
 	}

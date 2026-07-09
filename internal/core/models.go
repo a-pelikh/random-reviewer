@@ -16,11 +16,12 @@ type Reviewer struct {
 }
 
 type Review struct {
-	ID             int64
-	ReviewerID     UserID
-	ChatID         ChatID
-	MessageID      MessageID
-	PrevReviewerID *UserID
+	ID            int64
+	ReviewerID    UserID // empty = anchor record (M0/M1), no reviewer assigned
+	ChatID        ChatID
+	MessageID     MessageID
+	PrevMessageID *MessageID
+	RootMessageID MessageID // first message in the chain (M0)
 }
 
 type ResetType string
