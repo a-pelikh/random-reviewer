@@ -165,7 +165,7 @@ func (b *Bot) Start() {
 
 func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 	slog.Info("matchCommand", "text", payload.Message().Text, "parts", payload.Parts)
-	texts := strings.Split(payload.Message().Text, " ")
+	texts := strings.Fields(payload.Message().Text)
 	switch {
 	case slices.Contains(texts, helpCommand):
 		return reply(payload.Message(), helpText)
