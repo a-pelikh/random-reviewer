@@ -248,7 +248,7 @@ func (b *Bot) list(payload botgolang.EventPayload) error {
 	var sb strings.Builder
 	sb.WriteString("Список ревьюеров:\n")
 	for _, reviewer := range reviewers {
-		sb.WriteString(fmt.Sprintf("• [@%s] — вес: %d", reviewer.UserID, reviewer.Weight))
+		sb.WriteString(fmt.Sprintf("• @[%s] — вес: %d", reviewer.UserID, reviewer.Weight))
 		if reviewer.FreezeTime.After(time.Now()) {
 			sb.WriteString(fmt.Sprintf(", заморожен(а) до %s", reviewer.FreezeTime.Format(dateLayout)))
 		}
