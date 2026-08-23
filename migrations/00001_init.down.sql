@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS reviews_messages;
+DROP TABLE IF EXISTS reviews;
 DROP TABLE IF EXISTS reviewers;
 DROP TABLE IF EXISTS chats;
-DROP TYPE IF EXISTS reset_types;

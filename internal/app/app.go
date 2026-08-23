@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"randomreviewer/internal/config"
 	"randomreviewer/internal/core"
@@ -22,15 +24,26 @@ import (
 )
 
 const (
-	addCommand    = "add"
-	removeCommand = "remove"
-	helpCommand   = "help"
+	dateLayout = "02.01.2006"
+
+	addCommand      = "add"
+	removeCommand   = "remove"
+	helpCommand     = "help"
+	listCommand     = "list"
+	freezeCommand   = "freeze"
+	unfreezeCommand = "unfreeze"
+	resetCommand    = "reset"
 
 	helpText = `Команды:
 • @bot – выбрать ревьюера
 • @bot add @user – добавить ревьюера
 • @bot remove @user – удалить ревьюера
-• @bot help – список команд`
+• @bot help – список команд
+• @bot list – список ревьюеров
+• @bot reset <days> – устанавливает значение раз в сколько дней сбрасывается вес (раз в 14 дней по умолчанию)
+• @bot freeze @user <date> –  замораживает ревьюера до переданной даты включительно (формат даты: dd.mm.yyyy)
+• @bot unfreeze @user –  досрочно размораживает ревьюера
+`
 )
 
 type Bot struct {
@@ -94,16 +107,12 @@ func New(ctx context.Context, cfg *config.Config) (*Bot, error) {
 		repository = postgres.New(conn)
 	}
 
-	service, err := random_reviewer.New(repository, cfg.Bot.Secret)
-	if err != nil {
-		return nil, fmt.Errorf("new service: %w", err)
-	}
+	service := random_reviewer.New(repository)
 	app.service = service
-	//app.wg.Go(func() {
-	//	if err := app.service.Reset(ctx); err != nil {
-	//		slog.Warn("failed to reset chat", "error", err)
-	//	}
-	//})
+
+	app.wg.Go(func() { service.Reset(ctx) })
+	app.wg.Go(func() { service.Clean(ctx) })
+	app.wg.Go(func() { service.ResetWeights(ctx) })
 
 	return app, nil
 }
@@ -123,6 +132,15 @@ func getUserIDByMention(parts []botgolang.Part, botUserID string) (core.UserID, 
 
 	var zero core.UserID
 	return zero, core.ErrNoUserMentioned
+}
+
+func getReplyMsgID(parts []botgolang.Part) (string, bool) {
+	for _, part := range parts {
+		if part.Type == botgolang.REPLY {
+			return part.Payload.PartMessage.MsgID, true
+		}
+	}
+	return "", false
 }
 
 func reply(message *botgolang.Message, text string) error {
@@ -149,9 +167,7 @@ func (b *Bot) Start() {
 					_ = reply(update.Payload.Message(), "Пользователь уже является ревьюером в этом чате")
 				case errors.Is(err, core.ErrUserNotInReviewersList):
 					_ = reply(update.Payload.Message(), "Пользователя нет в списке ревьюеров")
-				case errors.Is(err, core.ErrUnknowCommand):
-					_ = reply(update.Payload.Message(), "Неизвестная команда, для отображения всех команд используйте команду help")
-				case err != nil:
+				default:
 					_ = reply(update.Payload.Message(), "Бот не может обработать ваше сообщение")
 				}
 			}
@@ -162,108 +178,84 @@ func (b *Bot) Start() {
 }
 
 func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
-	slog.Info("matchCommand", "text", payload.Message().Text, "parts", payload.Parts)
 	texts := strings.Fields(payload.Message().Text)
 	switch {
 	case slices.Contains(texts, helpCommand):
 		return reply(payload.Message(), helpText)
+	case slices.Contains(texts, listCommand):
+		return b.list(payload)
 	case slices.Contains(texts, addCommand):
 		return b.add(payload)
 	case slices.Contains(texts, removeCommand):
 		return b.remove(payload)
+	case slices.Contains(texts, resetCommand):
+		return b.setReset(payload, texts)
+	case slices.Contains(texts, freezeCommand):
+		return b.freeze(payload, texts)
+	case slices.Contains(texts, unfreezeCommand):
+		return b.unfreeze(payload)
 	default:
-		if replyMsgID, ok := getReplyMsgID(payload.Parts); ok {
-			return b.handleReply(payload, core.MessageID(replyMsgID))
-		}
-		return b.getReviewer(payload)
+		return b.assign(payload)
 	}
 }
 
-func (b *Bot) handleReply(payload botgolang.EventPayload, replyMsgID core.MessageID) error {
-	requesterID := core.UserID(payload.From.ID)
+func (b *Bot) assign(payload botgolang.EventPayload) error {
 	chatID := core.ChatID(payload.Chat.ID)
+	ownerID := core.UserID(payload.From.ID)
 
-	nextUserID, rootMsgID, err := b.service.RerollReview(b.ctx, chatID, replyMsgID, requesterID)
-	if errors.Is(err, core.ErrNotInChain) {
-		return b.assignInitial(payload, replyMsgID)
+	var repliedMessageIDs []core.MessageID
+	if replyMsgID, ok := getReplyMsgID(payload.Parts); ok {
+		repliedMessageIDs = append(repliedMessageIDs, core.MessageID(replyMsgID))
 	}
+
+	userID, reviewID, err := b.service.AssignReviewer(b.ctx, chatID, ownerID, repliedMessageIDs...)
 	if err != nil {
-		return fmt.Errorf("reroll review: %w", err)
+		return fmt.Errorf("assign reviewer: %w", err)
 	}
 
 	msg := payload.Message()
-	if err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", nextUserID)); err != nil {
+	if err := reply(msg, fmt.Sprintf("@[%s], ревью плиз", userID)); err != nil {
 		return fmt.Errorf("reply: %w", err)
 	}
 
-	botMsgID := core.MessageID(msg.ID)
-	if err = b.service.AssignReviewer(b.ctx, core.Review{
-		ReviewerID:    nextUserID,
-		ChatID:        chatID,
-		MessageID:     botMsgID,
-		PrevMessageID: &replyMsgID,
-		RootMessageID: rootMsgID,
-	}); err != nil {
-		slog.Error("failed to assign reviewer", "error", err)
+	oldMessageID, err := b.service.SetMessageID(b.ctx, reviewID, core.MessageID(msg.ID))
+	if err != nil {
+		slog.Error("failed to set message id", "error", err)
+		return nil
+	}
+
+	if oldMessageID != "" {
+		oldMsg := b.bot.NewMessage(payload.Chat.ID)
+		oldMsg.ID = string(oldMessageID)
+		if err := oldMsg.Delete(); err != nil {
+			slog.Error("failed to delete old message", "error", err)
+		}
 	}
 
 	return nil
 }
 
-// assignInitial selects a reviewer for the first time, stores the trigger message
-// as a null-reviewer anchor and the bot response as the actual review.
-// rootMsgID is the root of the chain (M0): for standalone calls it equals the trigger
-// message ID; for reply-to-M0 calls it is the replied-to message ID.
-func (b *Bot) assignInitial(payload botgolang.EventPayload, rootMsgID core.MessageID) error {
-	chatID := core.ChatID(payload.Chat.ID)
-
-	userID, err := b.service.GetReviewer(b.ctx, chatID, core.UserID(payload.From.ID))
+func (b *Bot) list(payload botgolang.EventPayload) error {
+	reviewers, err := b.service.GetReviewers(b.ctx, core.ChatID(payload.Chat.ID))
 	if err != nil {
-		return fmt.Errorf("get reviewer: %w", err)
+		return fmt.Errorf("get reviewers: %w", err)
 	}
 
-	msg := payload.Message()
-	triggerMsgID := core.MessageID(msg.ID) // M0 (standalone) or M1 (reply case)
-
-	if err = reply(msg, fmt.Sprintf("@[%s], ревью плиз", userID)); err != nil {
-		return fmt.Errorf("reply: %w", err)
+	if len(reviewers) == 0 {
+		return reply(payload.Message(), "Список ревьюеров пуст")
 	}
 
-	botMsgID := core.MessageID(msg.ID) // M2 (bot response, after reply)
-
-	if err = b.service.AssignReviewer(b.ctx, core.Review{
-		ChatID:        chatID,
-		MessageID:     triggerMsgID,
-		RootMessageID: rootMsgID,
-	}); err != nil {
-		slog.Error("failed to store anchor", "error", err)
-	}
-
-	if err = b.service.AssignReviewer(b.ctx, core.Review{
-		ReviewerID:    userID,
-		ChatID:        chatID,
-		MessageID:     botMsgID,
-		PrevMessageID: &triggerMsgID,
-		RootMessageID: rootMsgID,
-	}); err != nil {
-		slog.Error("failed to assign reviewer", "error", err)
-	}
-
-	return nil
-}
-
-func (b *Bot) getReviewer(payload botgolang.EventPayload) error {
-	rootMsgID := core.MessageID(payload.Message().ID)
-	return b.assignInitial(payload, rootMsgID)
-}
-
-func getReplyMsgID(parts []botgolang.Part) (string, bool) {
-	for _, part := range parts {
-		if part.Type == botgolang.REPLY {
-			return part.Payload.PartMessage.MsgID, true
+	var sb strings.Builder
+	sb.WriteString("Список ревьюеров:\n")
+	for _, reviewer := range reviewers {
+		sb.WriteString(fmt.Sprintf("• %s — вес: %d", reviewer.UserID, reviewer.Weight))
+		if reviewer.FreezeTime.After(time.Now()) {
+			sb.WriteString(fmt.Sprintf(", заморожен(а) до %s", reviewer.FreezeTime.Format(dateLayout)))
 		}
+		sb.WriteString("\n")
 	}
-	return "", false
+
+	return reply(payload.Message(), sb.String())
 }
 
 func (b *Bot) add(payload botgolang.EventPayload) error {
@@ -273,7 +265,7 @@ func (b *Bot) add(payload botgolang.EventPayload) error {
 	}
 
 	if err = b.service.AddReviewer(b.ctx, core.Reviewer{
-		ID:     userID,
+		UserID: userID,
 		ChatID: core.ChatID(payload.Chat.ID),
 	}); err != nil {
 		return fmt.Errorf("add reviewer: %w", err)
@@ -289,11 +281,79 @@ func (b *Bot) remove(payload botgolang.EventPayload) error {
 	}
 
 	if err = b.service.RemoveReviewer(b.ctx, core.Reviewer{
-		ID:     userID,
+		UserID: userID,
 		ChatID: core.ChatID(payload.Chat.ID),
 	}); err != nil {
 		return fmt.Errorf("remove reviewer: %w", err)
 	}
 
 	return reply(payload.Message(), fmt.Sprintf("@[%s], вы удалены из списка ревьюеров", userID))
+}
+
+func (b *Bot) setReset(payload botgolang.EventPayload, texts []string) error {
+	days, err := parseIntArg(texts)
+	if err != nil {
+		return fmt.Errorf("invalid command: %w", err)
+	}
+
+	if err := b.service.SetReset(b.ctx, core.ChatID(payload.Chat.ID), days); err != nil {
+		return fmt.Errorf("set reset: %w", err)
+	}
+
+	return reply(payload.Message(), fmt.Sprintf("Вес ревьюеров теперь сбрасывается раз в %d дней", days))
+}
+
+func (b *Bot) freeze(payload botgolang.EventPayload, texts []string) error {
+	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	if err != nil {
+		return fmt.Errorf("invalid command: %w", err)
+	}
+
+	date, err := parseDateArg(texts)
+	if err != nil {
+		return fmt.Errorf("invalid command: %w", err)
+	}
+
+	if err := b.service.Freeze(b.ctx, core.Reviewer{
+		UserID: userID,
+		ChatID: core.ChatID(payload.Chat.ID),
+	}, date); err != nil {
+		return fmt.Errorf("freeze reviewer: %w", err)
+	}
+
+	return reply(payload.Message(), fmt.Sprintf("@[%s], заморожен(а) до %s включительно", userID, date.Format(dateLayout)))
+}
+
+func (b *Bot) unfreeze(payload botgolang.EventPayload) error {
+	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	if err != nil {
+		return fmt.Errorf("invalid command: %w", err)
+	}
+
+	if err := b.service.Unfreeze(b.ctx, core.Reviewer{
+		UserID: userID,
+		ChatID: core.ChatID(payload.Chat.ID),
+	}); err != nil {
+		return fmt.Errorf("unfreeze reviewer: %w", err)
+	}
+
+	return reply(payload.Message(), fmt.Sprintf("@[%s], разморожен(а)", userID))
+}
+
+func parseIntArg(texts []string) (int, error) {
+	for _, text := range texts {
+		if n, err := strconv.Atoi(text); err == nil {
+			return n, nil
+		}
+	}
+	return 0, fmt.Errorf("no integer argument found")
+}
+
+func parseDateArg(texts []string) (time.Time, error) {
+	for _, text := range texts {
+		if date, err := time.Parse(dateLayout, text); err == nil {
+			return date, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("no date argument found")
 }

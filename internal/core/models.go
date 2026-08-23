@@ -3,36 +3,38 @@ package core
 import "time"
 
 type (
-	UserID    string
-	ChatID    string
-	MessageID string
+	ReviewID   int64
+	ReviewerID int64
+	UserID     string
+	ChatID     string
+	MessageID  string
 )
 
 type Reviewer struct {
-	ID         UserID
+	ID         ReviewerID
+	UserID     UserID
 	ChatID     ChatID
 	Weight     int
 	FreezeTime time.Time
+	IsDeleted  bool
 }
 
 type Review struct {
-	ID            int64
-	ReviewerID    UserID // empty = anchor record (M0/M1), no reviewer assigned
-	ChatID        ChatID
-	MessageID     MessageID
-	PrevMessageID *MessageID
-	RootMessageID MessageID // first message in the chain (M0)
+	ID         ReviewID
+	ReviewerID ReviewerID
+	OwnerID    UserID
+	MessageID  MessageID
+	CreatedAt  time.Time
 }
 
-type ResetType string
-
-const (
-	ResetTypeDay   ResetType = "day"
-	ResetTypeWeek  ResetType = "week"
-	ResetTypeMonth ResetType = "month"
-)
+type ReviewMessage struct {
+	ReviewID   ReviewID
+	ReviewerID ReviewerID
+	MessageID  MessageID
+}
 
 type Chat struct {
-	ID    ChatID
-	Reset ResetType
+	ID        ChatID
+	Reset     int
+	LastReset time.Time
 }

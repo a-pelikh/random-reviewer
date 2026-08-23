@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"randomreviewer/internal/core"
 )
@@ -15,29 +16,376 @@ type repositoryImpl struct {
 }
 
 func New(db *sql.DB) core.ReviewersRepository {
-	return &repositoryImpl{
-		db: db,
+	return &repositoryImpl{db: db}
+}
+
+func (r *repositoryImpl) GetReview(ctx context.Context, messageID core.MessageID) (core.Review, error) {
+	const query = `
+		SELECT 
+			r.review_id,
+			r.reviewer_id,
+			r.owner_id,
+			r.message_id,
+			r.created_at
+		FROM reviews r
+		JOIN reviews_messages rm on r.review_id = rm.review_id
+		WHERE rm.message_id = $1
+		LIMIT 1
+	`
+
+	var review core.Review
+	if err := r.db.QueryRowContext(ctx, query, messageID).Scan(
+		&review.ID,
+		&review.ReviewerID,
+		&review.OwnerID,
+		&review.MessageID,
+		&review.CreatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return review, core.ErrReviewNotFound
+		}
+
+		return review, fmt.Errorf("query row: %w", err)
 	}
+
+	return review, nil
+}
+
+func (r *repositoryImpl) AssignReviewer(ctx context.Context, review core.Review) (reviewID core.ReviewID, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+			panic(p)
+		} else if err != nil {
+			slog.Error("assign reviewer err", "error", err)
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+		} else {
+			err = tx.Commit()
+		}
+	}()
+
+	const query = `
+		INSERT INTO reviews (reviewer_id, owner_id) VALUES ($1, $2) RETURNING review_id
+	`
+
+	if err = tx.QueryRowContext(ctx, query, review.ReviewerID, review.OwnerID).Scan(&reviewID); err != nil {
+		return 0, fmt.Errorf("insert review: %w", err)
+	}
+
+	if err = r.incrementWeight(ctx, tx, review.ReviewerID); err != nil {
+		return 0, err
+	}
+
+	return reviewID, nil
+}
+
+func (r *repositoryImpl) incrementWeight(ctx context.Context, tx *sql.Tx, reviewerID core.ReviewerID) error {
+	const query = `UPDATE reviewers SET weight = weight + 1 WHERE reviewer_id = $1`
+	if _, err := tx.ExecContext(ctx, query, reviewerID); err != nil {
+		return fmt.Errorf("increment reviewer weight: %w", err)
+	}
+	return nil
+}
+
+func (r *repositoryImpl) decrementWeight(ctx context.Context, tx *sql.Tx, reviewerID core.ReviewerID) error {
+	const query = `UPDATE reviewers SET weight = GREATEST(weight - 1, 0) WHERE reviewer_id = $1`
+	if _, err := tx.ExecContext(ctx, query, reviewerID); err != nil {
+		return fmt.Errorf("decrement reviewer weight: %w", err)
+	}
+	return nil
+}
+
+func (r *repositoryImpl) SaveReviewMessages(ctx context.Context, reviewID core.ReviewID, reviewerID core.ReviewerID, messagesID ...core.MessageID) (err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+			panic(p)
+		} else if err != nil {
+			slog.Error("save review messages err", "error", err)
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+		} else {
+			err = tx.Commit()
+		}
+	}()
+
+	const saveReviewMessagesQuery = `
+		INSERT INTO reviews_messages (review_id, reviewer_id, message_id) VALUES ($1, $2, $3)
+	`
+	for _, messageID := range messagesID {
+		if _, err = tx.ExecContext(ctx, saveReviewMessagesQuery, reviewID, reviewerID, messageID); err != nil {
+			return fmt.Errorf("save review messages: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (r *repositoryImpl) RerollReviewer(ctx context.Context, newReviewerID core.ReviewerID, reviewID core.ReviewID) (err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+			panic(p)
+		} else if err != nil {
+			slog.Error("reroll reviewer err", "error", err)
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+		} else {
+			err = tx.Commit()
+		}
+	}()
+
+	const getCurrentReviewerQuery = `SELECT reviewer_id FROM reviews WHERE review_id = $1`
+	var oldReviewerID core.ReviewerID
+	if err = tx.QueryRowContext(ctx, getCurrentReviewerQuery, reviewID).Scan(&oldReviewerID); err != nil {
+		return fmt.Errorf("get current reviewer: %w", err)
+	}
+
+	const setReviewerQuery = `UPDATE reviews SET reviewer_id = $1 WHERE review_id = $2`
+	if _, err = tx.ExecContext(ctx, setReviewerQuery, newReviewerID, reviewID); err != nil {
+		return fmt.Errorf("set new reviewer: %w", err)
+	}
+
+	if err = r.incrementWeight(ctx, tx, newReviewerID); err != nil {
+		return err
+	}
+
+	if err = r.decrementWeight(ctx, tx, oldReviewerID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *repositoryImpl) GetAvailableReviewers(ctx context.Context, review core.ReviewID) ([]core.Reviewer, error) {
+	const query = `
+		SELECT r.reviewer_id, r.user_id, r.weight
+		FROM reviewers r
+		JOIN reviews rev ON rev.review_id = $1
+		JOIN reviewers cur ON cur.reviewer_id = rev.reviewer_id
+		WHERE r.chat_id = cur.chat_id
+  			AND r.is_deleted = FALSE
+  			AND (r.freeze_time IS NULL OR r.freeze_time < NOW())
+  			AND r.user_id != rev.owner_id
+  			AND r.reviewer_id NOT IN (
+      			SELECT reviewer_id FROM reviews_messages WHERE review_id = $1
+  			)
+	`
+	rows, err := r.db.QueryContext(ctx, query, review)
+	if err != nil {
+		return nil, fmt.Errorf("query available reviewers: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Warn("close rows", "error", err)
+		}
+	}()
+
+	var reviewers []core.Reviewer
+	for rows.Next() {
+		var rev core.Reviewer
+		if err := rows.Scan(&rev.ID, &rev.UserID, &rev.Weight); err != nil {
+			return nil, fmt.Errorf("scan reviewer: %w", err)
+		}
+		reviewers = append(reviewers, rev)
+	}
+	return reviewers, rows.Err()
+}
+
+func (r *repositoryImpl) SetReset(ctx context.Context, chatID core.ChatID, reset int) error {
+	const query = `UPDATE chats SET reset_days = $2 WHERE chat_id = $1;`
+	_, err := r.db.ExecContext(ctx, query, chatID, reset)
+	if err != nil {
+		return fmt.Errorf("set reset: %w", err)
+	}
+	return nil
+}
+
+func (r *repositoryImpl) Reset(ctx context.Context) error {
+	const query = `
+		WITH due_chats AS (
+			SELECT chat_id FROM chats
+			WHERE last_reset IS NULL OR last_reset <= NOW() - make_interval(days => reset_days)
+		),
+		reset_weights AS (
+			UPDATE reviewers SET weight = 0
+			WHERE chat_id IN (SELECT chat_id FROM due_chats)
+		)
+		UPDATE chats SET last_reset = NOW()
+		WHERE chat_id IN (SELECT chat_id FROM due_chats);
+	`
+	if _, err := r.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("reset: %w", err)
+	}
+	return nil
+}
+
+func (r *repositoryImpl) Clean(ctx context.Context) error {
+	const query = `
+		WITH due_reviews AS (
+			SELECT review_id FROM reviews
+			WHERE created_at <= NOW() - INTERVAL '14 days'
+		),
+		del_messages AS (
+			DELETE FROM reviews_messages
+			WHERE review_id IN (SELECT review_id FROM due_reviews)
+		)
+		DELETE FROM reviews
+		WHERE review_id IN (SELECT review_id FROM due_reviews);
+	`
+	if _, err := r.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("clean: %w", err)
+	}
+	return nil
+}
+
+func (r *repositoryImpl) Unfreeze(ctx context.Context, reviewer core.Reviewer) error {
+	const query = `
+		WITH avg_weight AS (
+			SELECT COALESCE(CEIL(AVG(weight))::int, 0) AS w
+			FROM reviewers
+			WHERE chat_id = $2 AND is_deleted = FALSE
+			  AND (freeze_time IS NULL OR freeze_time < NOW())
+		)
+		UPDATE reviewers SET freeze_time = NULL, weight = avg_weight.w
+		FROM avg_weight
+		WHERE user_id = $1 AND chat_id = $2;
+	`
+	result, err := r.db.ExecContext(ctx, query, reviewer.UserID, reviewer.ChatID)
+	if err != nil {
+		return fmt.Errorf("unfreeze reviewer: %w", err)
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return core.ErrUserNotInReviewersList
+	}
+
+	return nil
+}
+
+func (r *repositoryImpl) Freeze(ctx context.Context, reviewer core.Reviewer, date time.Time) error {
+	const query = `
+		UPDATE reviewers SET freeze_time = $3
+		WHERE user_id = $1 AND chat_id = $2 AND is_deleted = FALSE;
+	`
+	result, err := r.db.ExecContext(ctx, query, reviewer.UserID, reviewer.ChatID, date)
+	if err != nil {
+		return fmt.Errorf("freeze reviewer: %w", err)
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return core.ErrUserNotInReviewersList
+	}
+
+	return nil
+}
+
+func (r *repositoryImpl) ResetWeights(ctx context.Context) error {
+	const query = `
+		WITH avg_per_chat AS (
+			SELECT chat_id, COALESCE(CEIL(AVG(weight))::int, 0) AS w
+			FROM reviewers
+			WHERE is_deleted = FALSE AND (freeze_time IS NULL OR freeze_time < NOW())
+			GROUP BY chat_id
+		)
+		UPDATE reviewers r
+		SET weight = a.w
+		FROM avg_per_chat a
+		WHERE r.chat_id = a.chat_id
+		  AND r.is_deleted = FALSE
+		  AND r.freeze_time::date = NOW()::date;
+	`
+	if _, err := r.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("reset weights: %w", err)
+	}
+	return nil
+}
+
+func (r *repositoryImpl) GetReviewers(ctx context.Context, chatID core.ChatID) ([]core.Reviewer, error) {
+	const query = `
+		SELECT reviewer_id, user_id, weight, freeze_time FROM reviewers
+		WHERE chat_id = $1 AND is_deleted = FALSE
+	`
+	rows, err := r.db.QueryContext(ctx, query, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("query reviewers: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Warn("close rows", "error", err)
+		}
+	}()
+
+	var reviewers []core.Reviewer
+	for rows.Next() {
+		var rev core.Reviewer
+		var freezeTime sql.NullTime
+		if err := rows.Scan(&rev.ID, &rev.UserID, &rev.Weight, &freezeTime); err != nil {
+			return nil, fmt.Errorf("scan reviewer: %w", err)
+		}
+		rev.ChatID = chatID
+		rev.FreezeTime = freezeTime.Time
+		reviewers = append(reviewers, rev)
+	}
+	return reviewers, rows.Err()
 }
 
 func (r *repositoryImpl) AddReviewer(ctx context.Context, reviewer core.Reviewer) (err error) {
-	const insertReviewer = `
-	INSERT INTO reviewers (user_id, chat_id) VALUES ($1, $2)
-	ON CONFLICT (user_id, chat_id) DO UPDATE SET is_deleted = FALSE
-	WHERE reviewers.is_deleted = TRUE;
-`
-	tx, err := r.db.Begin()
+	const query = `
+		WITH avg_weight AS (
+			SELECT COALESCE(CEIL(AVG(weight))::int, 0) AS w
+			FROM reviewers
+			WHERE chat_id = $2 AND is_deleted = FALSE
+			  AND (freeze_time IS NULL OR freeze_time < NOW())
+		)
+		INSERT INTO reviewers (user_id, chat_id, weight)
+		SELECT $1, $2, w FROM avg_weight
+		ON CONFLICT (user_id, chat_id) DO UPDATE
+			SET is_deleted = FALSE, weight = EXCLUDED.weight
+			WHERE reviewers.is_deleted = TRUE
+			  AND (reviewers.freeze_time IS NULL OR reviewers.freeze_time < NOW());
+	`
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("could not start transaction: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() {
-		if errPanic := recover(); errPanic != nil {
-			if errRollback := tx.Rollback(); err != nil {
-				slog.Warn("could not rollback transaction", "error", errRollback)
-			}
-		} else if err != nil {
-			if errRollback := tx.Rollback(); err != nil {
-				slog.Warn("could not rollback transaction", "error", errRollback)
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				slog.Warn("rollback", "error", rbErr)
 			}
 		} else {
 			err = tx.Commit()
@@ -48,16 +396,16 @@ func (r *repositoryImpl) AddReviewer(ctx context.Context, reviewer core.Reviewer
 		return err
 	}
 
-	result, err := tx.ExecContext(ctx, insertReviewer, reviewer.ID, reviewer.ChatID)
+	result, err := tx.ExecContext(ctx, query, reviewer.UserID, reviewer.ChatID)
 	if err != nil {
-		return err
+		return fmt.Errorf("insert reviewer: %w", err)
 	}
 
-	rows, err := result.RowsAffected()
+	n, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if rows == 0 {
+	if n == 0 {
 		return core.ErrUserAlreadyAdded
 	}
 
@@ -66,219 +414,76 @@ func (r *repositoryImpl) AddReviewer(ctx context.Context, reviewer core.Reviewer
 
 func (r *repositoryImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer) error {
 	const query = `
-	UPDATE reviewers SET is_deleted = TRUE
-	WHERE user_id = $1 AND chat_id = $2 AND is_deleted = FALSE;
-`
-	result, err := r.db.ExecContext(ctx, query, reviewer.ID, reviewer.ChatID)
+		UPDATE reviewers SET is_deleted = TRUE
+		WHERE user_id = $1 AND chat_id = $2 AND is_deleted = FALSE;
+	`
+	result, err := r.db.ExecContext(ctx, query, reviewer.UserID, reviewer.ChatID)
 	if err != nil {
-		return fmt.Errorf("could not remove reviewer: %w", err)
+		return fmt.Errorf("remove reviewer: %w", err)
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return core.ErrUserNotInReviewersList
-	}
-
-	return nil
-}
-
-func (r *repositoryImpl) GetAvailableReviewers(ctx context.Context, chatID core.ChatID) ([]core.Reviewer, error) {
-	const query = `
-	SELECT user_id, weight FROM reviewers
-	WHERE chat_id = $1
-	  AND is_deleted = FALSE
-	  AND (freeze_time IS NULL OR freeze_time < NOW());
-`
-	rows, err := r.db.QueryContext(ctx, query, chatID)
-	if err != nil {
-		return nil, fmt.Errorf("could not query reviewers: %w", err)
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			slog.Warn("could not close rows", "error", err)
-		}
-	}()
-
-	var reviewers []core.Reviewer
-	for rows.Next() {
-		var rev core.Reviewer
-		if err := rows.Scan(&rev.ID, &rev.Weight); err != nil {
-			return nil, fmt.Errorf("could not scan reviewer: %w", err)
-		}
-		rev.ChatID = chatID
-		reviewers = append(reviewers, rev)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
-	}
-
-	return reviewers, nil
-}
-
-func (r *repositoryImpl) IncrementWeight(ctx context.Context, chatID core.ChatID, userID core.UserID) error {
-	const query = `
-	UPDATE reviewers SET weight = weight + 1
-	WHERE chat_id = $1 AND user_id = $2;
-`
-	result, err := r.db.ExecContext(ctx, query, chatID, userID)
-	if err != nil {
-		return fmt.Errorf("could not increment weight: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
+	n, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if rows == 0 {
+	if n == 0 {
 		return core.ErrUserNotInReviewersList
 	}
-
 	return nil
 }
 
-func (r *repositoryImpl) AssignReviewer(ctx context.Context, review core.Review) (err error) {
-	tx, err := r.db.Begin()
+func (r *repositoryImpl) SetMessageID(ctx context.Context, reviewID core.ReviewID, messageID core.MessageID) (oldMessageID core.MessageID, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("could not start transaction: %w", err)
+		return "", fmt.Errorf("begin tx: %w", err)
 	}
+
 	defer func() {
-		if err != nil {
-			if errRollback := tx.Rollback(); errRollback != nil {
-				slog.Warn("could not rollback transaction", "error", errRollback)
+		if p := recover(); p != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
+			}
+			panic(p)
+		} else if err != nil {
+			slog.Error("set message id err", "error", err)
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				slog.Error("rollback tx err", "error", rollbackErr)
 			}
 		} else {
 			err = tx.Commit()
 		}
 	}()
 
-	if review.ReviewerID != "" {
-		if err = r.incrementWeightTx(ctx, tx, review.ChatID, review.ReviewerID); err != nil {
-			return fmt.Errorf("could not increment weight: %w", err)
-		}
-
-		if review.PrevMessageID != nil {
-			if err = r.deincrementWeightByMessageTx(ctx, tx, review.ChatID, *review.PrevMessageID); err != nil {
-				return fmt.Errorf("could not deincrement weight: %w", err)
-			}
-		}
-	}
-
-	if err = r.insertReviewTx(ctx, tx, review); err != nil {
-		return fmt.Errorf("could not insert review: %w", err)
-	}
-
-	return nil
-}
-
-func (r *repositoryImpl) incrementWeightTx(ctx context.Context, tx *sql.Tx, chatID core.ChatID, userID core.UserID) error {
-	const query = `
-	UPDATE reviewers SET weight = weight + 1
-	WHERE chat_id = $1 AND user_id = $2;
-`
-	result, err := tx.ExecContext(ctx, query, chatID, userID)
-	if err != nil {
-		return fmt.Errorf("could not increment weight: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return core.ErrUserNotInReviewersList
-	}
-
-	return nil
-}
-
-func (r *repositoryImpl) insertReviewTx(ctx context.Context, tx *sql.Tx, review core.Review) error {
-	const query = `
-	INSERT INTO reviews (reviewer_id, chat_id, message_id, prev_message_id, root_message_id)
-	VALUES ($1, $2, $3, $4, $5);
-`
-	var reviewerID sql.NullString
-	if review.ReviewerID != "" {
-		reviewerID = sql.NullString{String: string(review.ReviewerID), Valid: true}
-	}
-	_, err := tx.ExecContext(ctx, query, reviewerID, review.ChatID, review.MessageID, review.PrevMessageID, review.RootMessageID)
-	if err != nil {
-		return fmt.Errorf("could not insert review: %w", err)
-	}
-
-	return nil
-}
-
-func (r *repositoryImpl) GetChainReviewers(ctx context.Context, messageID core.MessageID) (core.MessageID, []core.UserID, error) {
-	// Find the root message ID: messageID can be a direct message_id or a root_message_id of some chain.
-	var rootMsgID string
-	const findRootQuery = `
-		(SELECT root_message_id FROM reviews WHERE message_id = $1 LIMIT 1)
-		UNION ALL
-		(SELECT root_message_id FROM reviews WHERE root_message_id = $1 LIMIT 1)
-		LIMIT 1;
+	const updateQuery = `
+		WITH old AS (
+			SELECT message_id, reviewer_id FROM reviews WHERE review_id = $1 FOR UPDATE
+		)
+		UPDATE reviews SET message_id = $2
+		FROM old
+		WHERE reviews.review_id = $1
+		RETURNING old.message_id, old.reviewer_id;
 	`
-	err := r.db.QueryRowContext(ctx, findRootQuery, messageID).Scan(&rootMsgID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil, core.ErrNotInChain
+	var oldMsg sql.NullString
+	var reviewerID core.ReviewerID
+	if err = tx.QueryRowContext(ctx, updateQuery, reviewID, messageID).Scan(&oldMsg, &reviewerID); err != nil {
+		return "", fmt.Errorf("set message id: %w", err)
 	}
-	if err != nil {
-		return "", nil, fmt.Errorf("could not find chain root: %w", err)
-	}
-
-	const getReviewersQuery = `
-		SELECT reviewer_id FROM reviews
-		WHERE root_message_id = $1 AND reviewer_id IS NOT NULL;
-	`
-	rows, err := r.db.QueryContext(ctx, getReviewersQuery, rootMsgID)
-	if err != nil {
-		return "", nil, fmt.Errorf("could not query chain reviewers: %w", err)
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			slog.Warn("could not close rows", "error", err)
-		}
-	}()
-
-	var reviewerIDs []core.UserID
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return "", nil, fmt.Errorf("could not scan reviewer id: %w", err)
-		}
-		reviewerIDs = append(reviewerIDs, core.UserID(id))
-	}
-	if err := rows.Err(); err != nil {
-		return "", nil, fmt.Errorf("rows error: %w", err)
+	if oldMsg.Valid {
+		oldMessageID = core.MessageID(oldMsg.String)
 	}
 
-	return core.MessageID(rootMsgID), reviewerIDs, nil
-}
-
-func (r *repositoryImpl) deincrementWeightByMessageTx(ctx context.Context, tx *sql.Tx, chatID core.ChatID, prevMessageID core.MessageID) error {
-	const query = `
-	UPDATE reviewers SET weight = GREATEST(weight - 1, 0)
-	WHERE chat_id = $1 AND user_id = (SELECT reviewer_id FROM reviews WHERE message_id = $2);
-`
-	_, err := tx.ExecContext(ctx, query, chatID, prevMessageID)
-	if err != nil {
-		return fmt.Errorf("could not deincrement weight: %w", err)
+	const insertQuery = `INSERT INTO reviews_messages (review_id, reviewer_id, message_id) VALUES ($1, $2, $3);`
+	if _, err = tx.ExecContext(ctx, insertQuery, reviewID, reviewerID, messageID); err != nil {
+		return "", fmt.Errorf("save review message: %w", err)
 	}
 
-	return nil
+	return oldMessageID, nil
 }
 
 func (r *repositoryImpl) addChat(ctx context.Context, tx *sql.Tx, chatID core.ChatID) error {
-	const insertChat = `
-	INSERT INTO chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING;
-`
-	_, err := tx.ExecContext(ctx, insertChat, chatID)
+	const query = `INSERT INTO chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING;`
+	_, err := tx.ExecContext(ctx, query, chatID)
 	if err != nil {
-		return fmt.Errorf("could not insert chat: %w", err)
+		return fmt.Errorf("insert chat: %w", err)
 	}
-
 	return nil
 }
