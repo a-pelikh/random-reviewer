@@ -480,7 +480,7 @@ func (r *repositoryImpl) SetMessageID(ctx context.Context, reviewID core.ReviewI
 }
 
 func (r *repositoryImpl) addChat(ctx context.Context, tx *sql.Tx, chatID core.ChatID) error {
-	const query = `INSERT INTO chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING;`
+	const query = `INSERT INTO chats (chat_id, last_reset) VALUES ($1, NOW()) ON CONFLICT DO NOTHING;`
 	_, err := tx.ExecContext(ctx, query, chatID)
 	if err != nil {
 		return fmt.Errorf("insert chat: %w", err)

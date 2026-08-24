@@ -96,7 +96,8 @@ func (r *repositoryImpl) ensureChat(s *storage, chatID core.ChatID) {
 			return
 		}
 	}
-	s.Chats = append(s.Chats, chatRecord{ChatID: chatID, ResetDays: defaultResetDays})
+	now := time.Now()
+	s.Chats = append(s.Chats, chatRecord{ChatID: chatID, ResetDays: defaultResetDays, LastReset: &now})
 }
 
 func isFrozen(rec reviewerRecord, now time.Time) bool {

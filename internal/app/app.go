@@ -207,6 +207,7 @@ func (b *Bot) assign(payload botgolang.EventPayload) error {
 	if replyMsgID, ok := getReplyMsgID(payload.Parts); ok {
 		repliedMessageIDs = append(repliedMessageIDs, core.MessageID(replyMsgID))
 	}
+	repliedMessageIDs = append(repliedMessageIDs, core.MessageID(payload.Message().ID))
 
 	userID, reviewID, err := b.service.AssignReviewer(b.ctx, chatID, ownerID, repliedMessageIDs...)
 	if err != nil {
