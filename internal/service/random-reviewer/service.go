@@ -84,6 +84,7 @@ func (s *serviceImpl) AssignReviewer(ctx context.Context, chatID core.ChatID, ow
 	}
 
 	reviewer := s.pickReviewer(reviewers)
+
 	err = s.repository.RerollReviewer(ctx, reviewer.ID, review.ID)
 	if err != nil {
 		return "", 0, fmt.Errorf("reroll reviewer: %w", err)
@@ -102,6 +103,10 @@ func (s *serviceImpl) RemoveReviewer(ctx context.Context, reviewer core.Reviewer
 
 func (s *serviceImpl) SetReset(ctx context.Context, chatID core.ChatID, reset int) error {
 	return s.repository.SetReset(ctx, chatID, reset)
+}
+
+func (s *serviceImpl) GetStats(ctx context.Context, chatID core.ChatID) (core.ChatStats, error) {
+	return s.repository.GetStats(ctx, chatID)
 }
 
 func (s *serviceImpl) Reset(ctx context.Context) {

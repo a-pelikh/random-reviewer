@@ -1,11 +1,13 @@
 package fs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,7 +16,7 @@ import (
 
 const (
 	defaultResetDays = 14
-	cleanAfter       = 14 * 24 * time.Hour
+	cleanAfter       = 3 * 30 * 24 * time.Hour
 )
 
 type chatRecord struct {
@@ -411,6 +413,65 @@ func (r *repositoryImpl) GetAvailableReviewers(_ context.Context, reviewID core.
 	}
 
 	return reviewers, nil
+}
+
+func (r *repositoryImpl) GetStats(_ context.Context, chatID core.ChatID) (core.ChatStats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, err := r.load()
+	if err != nil {
+		return core.ChatStats{}, err
+	}
+
+	reviewerChat := make(map[core.ReviewerID]core.ChatID)
+	reviewerUser := make(map[core.ReviewerID]core.UserID)
+	for _, rec := range s.Reviewers {
+		reviewerChat[rec.ID] = rec.ChatID
+		reviewerUser[rec.ID] = rec.UserID
+	}
+
+	authorMRs := make(map[core.UserID]int)
+	reviewerReviews := make(map[core.ReviewerID]int)
+	var since time.Time
+	for _, rec := range s.Reviews {
+		if reviewerChat[rec.ReviewerID] != chatID {
+			continue
+		}
+		authorMRs[rec.OwnerID]++
+		reviewerReviews[rec.ReviewerID]++
+		if since.IsZero() || rec.CreatedAt.Before(since) {
+			since = rec.CreatedAt
+		}
+	}
+
+	var authors []core.AuthorStats
+	for userID, mrs := range authorMRs {
+		authors = append(authors, core.AuthorStats{UserID: userID, MRs: mrs})
+	}
+	slices.SortFunc(authors, func(a, b core.AuthorStats) int {
+		if c := cmp.Compare(b.MRs, a.MRs); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.UserID, b.UserID)
+	})
+
+	var reviewers []core.ReviewerStats
+	for reviewerID, reviews := range reviewerReviews {
+		reviewers = append(reviewers, core.ReviewerStats{UserID: reviewerUser[reviewerID], Reviews: reviews})
+	}
+	slices.SortFunc(reviewers, func(a, b core.ReviewerStats) int {
+		if c := cmp.Compare(b.Reviews, a.Reviews); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.UserID, b.UserID)
+	})
+
+	return core.ChatStats{
+		Since:     since,
+		Authors:   authors,
+		Reviewers: reviewers,
+	}, nil
 }
 
 func (r *repositoryImpl) SetReset(_ context.Context, chatID core.ChatID, reset int) error {

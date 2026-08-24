@@ -38,3 +38,19 @@ type Chat struct {
 	Reset     int
 	LastReset time.Time
 }
+
+type AuthorStats struct {
+	UserID UserID
+	MRs    int
+}
+
+type ReviewerStats struct {
+	UserID  UserID
+	Reviews int
+}
+
+type ChatStats struct {
+	Since     time.Time
+	Authors   []AuthorStats
+	Reviewers []ReviewerStats
+}

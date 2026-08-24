@@ -33,6 +33,7 @@ const (
 	freezeCommand   = "freeze"
 	unfreezeCommand = "unfreeze"
 	resetCommand    = "reset"
+	statsCommand    = "stats"
 
 	helpText = `Команды:
 • @bot – выбрать ревьюера
@@ -40,6 +41,7 @@ const (
 • @bot remove @user – удалить ревьюера
 • @bot help – список команд
 • @bot list – список ревьюеров
+• @bot stats – топ авторов и ревьюеров с даты последней очистки
 • @bot reset <days> – устанавливает значение раз в сколько дней сбрасывается вес (раз в 14 дней по умолчанию)
 • @bot freeze @user <date> –  замораживает ревьюера до переданной даты включительно (формат даты: dd.mm.yyyy)
 • @bot unfreeze @user –  досрочно размораживает ревьюера
@@ -184,6 +186,8 @@ func (b *Bot) matchCommand(payload botgolang.EventPayload) error {
 		return reply(payload.Message(), helpText)
 	case slices.Contains(texts, listCommand):
 		return b.list(payload)
+	case slices.Contains(texts, statsCommand):
+		return b.stats(payload)
 	case slices.Contains(texts, addCommand):
 		return b.add(payload)
 	case slices.Contains(texts, removeCommand):
@@ -253,6 +257,41 @@ func (b *Bot) list(payload botgolang.EventPayload) error {
 			sb.WriteString(fmt.Sprintf(", заморожен(а) до %s", reviewer.FreezeTime.Format(dateLayout)))
 		}
 		sb.WriteString("\n")
+	}
+
+	return reply(payload.Message(), sb.String())
+}
+
+func (b *Bot) stats(payload botgolang.EventPayload) error {
+	stats, err := b.service.GetStats(b.ctx, core.ChatID(payload.Chat.ID))
+	if err != nil {
+		return fmt.Errorf("get stats: %w", err)
+	}
+
+	if len(stats.Authors) == 0 && len(stats.Reviewers) == 0 {
+		return reply(payload.Message(), "Статистика пуста")
+	}
+
+	var sb strings.Builder
+	if !stats.Since.IsZero() {
+		sb.WriteString(fmt.Sprintf("Статистика с %s:\n\n", stats.Since.Format(dateLayout)))
+	}
+	if len(stats.Authors) > 0 {
+		sb.WriteString("Топ-авторы:\n")
+		for _, a := range stats.Authors {
+			sb.WriteString(fmt.Sprintf("• @[%s] - %d MR\n", a.UserID, a.MRs))
+		}
+		sb.WriteString(fmt.Sprintf("Товарищ @[%s], вы завалили ревьюеров работой — стаханов бы позавидовал!\n", stats.Authors[0].UserID))
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n")
+	}
+	if len(stats.Reviewers) > 0 {
+		sb.WriteString("Топ-ревьюеры:\n")
+		for _, r := range stats.Reviewers {
+			sb.WriteString(fmt.Sprintf("• @[%s] - %d MR\n", r.UserID, r.Reviews))
+		}
+		sb.WriteString(fmt.Sprintf("Товарищ @[%s], вы ревьюерите за четверых — партия вами гордится!\n", stats.Reviewers[0].UserID))
 	}
 
 	return reply(payload.Message(), sb.String())
