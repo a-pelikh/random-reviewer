@@ -17,6 +17,7 @@ type ReviewersService interface {
 	Freeze(ctx context.Context, reviewer Reviewer, date time.Time) error
 	Unfreeze(ctx context.Context, reviewer Reviewer) error
 	ResetWeights(ctx context.Context)
+	GetStats(ctx context.Context, chatID ChatID) (ChatStats, error)
 }
 
 type ReviewersRepository interface {
@@ -35,4 +36,5 @@ type ReviewersRepository interface {
 	Unfreeze(ctx context.Context, reviewer Reviewer) error
 	Freeze(ctx context.Context, reviewer Reviewer, date time.Time) error
 	ResetWeights(ctx context.Context) error
+	GetStats(ctx context.Context, chatID ChatID) (ChatStats, error)
 }

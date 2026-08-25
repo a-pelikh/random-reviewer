@@ -249,7 +249,7 @@ func (r *repositoryImpl) Clean(ctx context.Context) error {
 	const query = `
 		WITH due_reviews AS (
 			SELECT review_id FROM reviews
-			WHERE created_at <= NOW() - INTERVAL '14 days'
+			WHERE created_at <= NOW() - INTERVAL '3 months'
 		),
 		del_messages AS (
 			DELETE FROM reviews_messages
@@ -361,6 +361,87 @@ func (r *repositoryImpl) GetReviewers(ctx context.Context, chatID core.ChatID) (
 		reviewers = append(reviewers, rev)
 	}
 	return reviewers, rows.Err()
+}
+
+func (r *repositoryImpl) GetStats(ctx context.Context, chatID core.ChatID) (core.ChatStats, error) {
+	const sinceQuery = `
+		SELECT MIN(rev.created_at)
+		FROM reviews rev
+		JOIN reviewers r ON r.reviewer_id = rev.reviewer_id
+		WHERE r.chat_id = $1
+	`
+	var stats core.ChatStats
+	var since sql.NullTime
+	if err := r.db.QueryRowContext(ctx, sinceQuery, chatID).Scan(&since); err != nil {
+		return core.ChatStats{}, fmt.Errorf("query since: %w", err)
+	}
+	if since.Valid {
+		stats.Since = since.Time
+	}
+
+	const authorsQuery = `
+		SELECT rev.owner_id, COUNT(*) AS mrs
+		FROM reviews rev
+		JOIN reviewers r ON r.reviewer_id = rev.reviewer_id
+		WHERE r.chat_id = $1
+		GROUP BY rev.owner_id
+		ORDER BY mrs DESC
+	`
+	authorRows, err := r.db.QueryContext(ctx, authorsQuery, chatID)
+	if err != nil {
+		return core.ChatStats{}, fmt.Errorf("query authors: %w", err)
+	}
+	defer func() {
+		if err := authorRows.Close(); err != nil {
+			slog.Warn("close rows", "error", err)
+		}
+	}()
+
+	var authors []core.AuthorStats
+	for authorRows.Next() {
+		var a core.AuthorStats
+		if err := authorRows.Scan(&a.UserID, &a.MRs); err != nil {
+			return core.ChatStats{}, fmt.Errorf("scan author: %w", err)
+		}
+		authors = append(authors, a)
+	}
+	if err := authorRows.Err(); err != nil {
+		return core.ChatStats{}, fmt.Errorf("rows err: %w", err)
+	}
+
+	const reviewersQuery = `
+		SELECT r.user_id, COUNT(rev.review_id) AS reviews
+		FROM reviewers r
+		JOIN reviews rev ON rev.reviewer_id = r.reviewer_id
+		WHERE r.chat_id = $1
+		GROUP BY r.user_id
+		ORDER BY reviews DESC
+	`
+	reviewerRows, err := r.db.QueryContext(ctx, reviewersQuery, chatID)
+	if err != nil {
+		return core.ChatStats{}, fmt.Errorf("query reviewers: %w", err)
+	}
+	defer func() {
+		if err := reviewerRows.Close(); err != nil {
+			slog.Warn("close rows", "error", err)
+		}
+	}()
+
+	var reviewers []core.ReviewerStats
+	for reviewerRows.Next() {
+		var rs core.ReviewerStats
+		if err := reviewerRows.Scan(&rs.UserID, &rs.Reviews); err != nil {
+			return core.ChatStats{}, fmt.Errorf("scan reviewer: %w", err)
+		}
+		reviewers = append(reviewers, rs)
+	}
+	if err := reviewerRows.Err(); err != nil {
+		return core.ChatStats{}, fmt.Errorf("rows err: %w", err)
+	}
+
+	stats.Authors = authors
+	stats.Reviewers = reviewers
+	return stats, nil
 }
 
 func (r *repositoryImpl) AddReviewer(ctx context.Context, reviewer core.Reviewer) (err error) {
