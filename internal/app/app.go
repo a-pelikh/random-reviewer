@@ -125,15 +125,31 @@ func matchPartTypeWithBotUserIDMention(botUserID string) func(part botgolang.Par
 	}
 }
 
-func getUserIDByMention(parts []botgolang.Part, botUserID string) (core.UserID, error) {
+type mentionedUser struct {
+	UserID    core.UserID
+	FirstName string
+	LastName  string
+}
+
+func getMentionedUser(parts []botgolang.Part, botUserID string) (mentionedUser, error) {
 	for _, part := range parts {
 		if part.Type == botgolang.MENTION && botUserID != part.Payload.UserID {
-			return core.UserID(part.Payload.UserID), nil
+			return mentionedUser{
+				UserID:    core.UserID(part.Payload.UserID),
+				FirstName: part.Payload.FirstName,
+				LastName:  part.Payload.LastName,
+			}, nil
 		}
 	}
 
-	var zero core.UserID
-	return zero, core.ErrNoUserMentioned
+	return mentionedUser{}, core.ErrNoUserMentioned
+}
+
+func fullName(firstName, lastName, userID string) string {
+	if firstName == "" && lastName == "" {
+		return userID
+	}
+	return strings.TrimSpace(firstName + " " + lastName)
 }
 
 func getReplyMsgID(parts []botgolang.Part) (string, bool) {
@@ -207,6 +223,10 @@ func (b *Bot) assign(payload botgolang.EventPayload) error {
 	chatID := core.ChatID(payload.Chat.ID)
 	ownerID := core.UserID(payload.From.ID)
 
+	if err := b.service.SaveUser(b.ctx, ownerID, payload.From.FirstName, payload.From.LastName); err != nil {
+		slog.Error("save user", "error", err)
+	}
+
 	var repliedMessageIDs []core.MessageID
 	if replyMsgID, ok := getReplyMsgID(payload.Parts); ok {
 		repliedMessageIDs = append(repliedMessageIDs, core.MessageID(replyMsgID))
@@ -253,7 +273,7 @@ func (b *Bot) list(payload botgolang.EventPayload) error {
 	var sb strings.Builder
 	sb.WriteString("Список ревьюеров:\n")
 	for _, reviewer := range reviewers {
-		sb.WriteString(fmt.Sprintf("• @[%s] — вес: %d", reviewer.UserID, reviewer.Weight))
+		sb.WriteString(fmt.Sprintf("• %s — вес: %d", fullName(reviewer.FirstName, reviewer.LastName, string(reviewer.UserID)), reviewer.Weight))
 		if reviewer.FreezeTime.After(time.Now()) {
 			sb.WriteString(fmt.Sprintf(", заморожен(а) до %s", reviewer.FreezeTime.Format(dateLayout)))
 		}
@@ -280,9 +300,10 @@ func (b *Bot) stats(payload botgolang.EventPayload) error {
 	if len(stats.Authors) > 0 {
 		sb.WriteString("Топ-авторы:\n")
 		for _, a := range stats.Authors {
-			sb.WriteString(fmt.Sprintf("• @[%s] - %d MR\n", a.UserID, a.MRs))
+			sb.WriteString(fmt.Sprintf("• %s - %d MR\n", fullName(a.FirstName, a.LastName, string(a.UserID)), a.MRs))
 		}
-		sb.WriteString(fmt.Sprintf("Товарищ @[%s], вы завалили ревьюеров работой — стаханов бы позавидовал!\n", stats.Authors[0].UserID))
+		sb.WriteString(fmt.Sprintf("Товарищ %s, вы завалили ревьюеров работой — стаханов бы позавидовал!\n",
+			fullName(stats.Authors[0].FirstName, stats.Authors[0].LastName, string(stats.Authors[0].UserID))))
 	}
 	if sb.Len() > 0 {
 		sb.WriteString("\n")
@@ -290,44 +311,49 @@ func (b *Bot) stats(payload botgolang.EventPayload) error {
 	if len(stats.Reviewers) > 0 {
 		sb.WriteString("Топ-ревьюеры:\n")
 		for _, r := range stats.Reviewers {
-			sb.WriteString(fmt.Sprintf("• @[%s] - %d MR\n", r.UserID, r.Reviews))
+			sb.WriteString(fmt.Sprintf("• %s - %d MR\n", fullName(r.FirstName, r.LastName, string(r.UserID)), r.Reviews))
 		}
-		sb.WriteString(fmt.Sprintf("Товарищ @[%s], вы ревьюерите за четверых — партия вами гордится!\n", stats.Reviewers[0].UserID))
+		sb.WriteString(fmt.Sprintf("Товарищ %s, вы ревьюерите за четверых — партия вами гордится!\n",
+			fullName(stats.Reviewers[0].FirstName, stats.Reviewers[0].LastName, string(stats.Reviewers[0].UserID))))
 	}
 
 	return reply(payload.Message(), sb.String())
 }
 
 func (b *Bot) add(payload botgolang.EventPayload) error {
-	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	user, err := getMentionedUser(payload.Parts, b.bot.Info.ID)
 	if err != nil {
 		return fmt.Errorf("invalid command: %w", err)
 	}
 
+	if err = b.service.SaveUser(b.ctx, user.UserID, user.FirstName, user.LastName); err != nil {
+		return fmt.Errorf("save user: %w", err)
+	}
+
 	if err = b.service.AddReviewer(b.ctx, core.Reviewer{
-		UserID: userID,
+		UserID: user.UserID,
 		ChatID: core.ChatID(payload.Chat.ID),
 	}); err != nil {
 		return fmt.Errorf("add reviewer: %w", err)
 	}
 
-	return reply(payload.Message(), fmt.Sprintf("@[%s], вы добавлены в список ревьюеров", userID))
+	return reply(payload.Message(), fmt.Sprintf("@[%s], вы добавлены в список ревьюеров", user.UserID))
 }
 
 func (b *Bot) remove(payload botgolang.EventPayload) error {
-	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	user, err := getMentionedUser(payload.Parts, b.bot.Info.ID)
 	if err != nil {
 		return fmt.Errorf("invalid command: %w", err)
 	}
 
 	if err = b.service.RemoveReviewer(b.ctx, core.Reviewer{
-		UserID: userID,
+		UserID: user.UserID,
 		ChatID: core.ChatID(payload.Chat.ID),
 	}); err != nil {
 		return fmt.Errorf("remove reviewer: %w", err)
 	}
 
-	return reply(payload.Message(), fmt.Sprintf("@[%s], вы удалены из списка ревьюеров", userID))
+	return reply(payload.Message(), fmt.Sprintf("@[%s], вы удалены из списка ревьюеров", user.UserID))
 }
 
 func (b *Bot) setReset(payload botgolang.EventPayload, texts []string) error {
@@ -344,7 +370,7 @@ func (b *Bot) setReset(payload botgolang.EventPayload, texts []string) error {
 }
 
 func (b *Bot) freeze(payload botgolang.EventPayload, texts []string) error {
-	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	user, err := getMentionedUser(payload.Parts, b.bot.Info.ID)
 	if err != nil {
 		return fmt.Errorf("invalid command: %w", err)
 	}
@@ -354,30 +380,34 @@ func (b *Bot) freeze(payload botgolang.EventPayload, texts []string) error {
 		return fmt.Errorf("invalid command: %w", err)
 	}
 
+	if err := b.service.SaveUser(b.ctx, user.UserID, user.FirstName, user.LastName); err != nil {
+		slog.Error("save user", "error", err)
+	}
+
 	if err := b.service.Freeze(b.ctx, core.Reviewer{
-		UserID: userID,
+		UserID: user.UserID,
 		ChatID: core.ChatID(payload.Chat.ID),
 	}, date); err != nil {
 		return fmt.Errorf("freeze reviewer: %w", err)
 	}
 
-	return reply(payload.Message(), fmt.Sprintf("@[%s], заморожен(а) до %s включительно", userID, date.Format(dateLayout)))
+	return reply(payload.Message(), fmt.Sprintf("@[%s], заморожен(а) до %s включительно", user.UserID, date.Format(dateLayout)))
 }
 
 func (b *Bot) unfreeze(payload botgolang.EventPayload) error {
-	userID, err := getUserIDByMention(payload.Parts, b.bot.Info.ID)
+	user, err := getMentionedUser(payload.Parts, b.bot.Info.ID)
 	if err != nil {
 		return fmt.Errorf("invalid command: %w", err)
 	}
 
-	if err := b.service.Unfreeze(b.ctx, core.Reviewer{
-		UserID: userID,
+	if err = b.service.Unfreeze(b.ctx, core.Reviewer{
+		UserID: user.UserID,
 		ChatID: core.ChatID(payload.Chat.ID),
 	}); err != nil {
 		return fmt.Errorf("unfreeze reviewer: %w", err)
 	}
 
-	return reply(payload.Message(), fmt.Sprintf("@[%s], разморожен(а)", userID))
+	return reply(payload.Message(), fmt.Sprintf("@[%s], разморожен(а)", user.UserID))
 }
 
 func parseIntArg(texts []string) (int, error) {

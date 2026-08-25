@@ -95,9 +95,18 @@ CREATE TABLE reviews_messages
     message_id  VARCHAR(255) NOT NULL,
     PRIMARY KEY (review_id, reviewer_id, message_id)
 );
+
+CREATE TABLE users
+(
+    user_id    VARCHAR(255) PRIMARY KEY,
+    first_name TEXT,
+    last_name  TEXT
+);
 ```
 
 `is_deleted = TRUE` используется вместо физического удаления ревьюера, чтобы не нарушать историю назначений (FK на `reviews`).
+
+Таблица `users` хранит имена и фамилии пользователей, собранные из сообщений и упоминаний. Команды `list` и `stats` выводят имена вместо тегов (упоминаний). Если имя ещё не было сохранено, выводится `user_id`.
 
 ## Команды
 

@@ -48,11 +48,18 @@ type reviewMessageRecord struct {
 	MessageID  core.MessageID  `json:"message_id"`
 }
 
+type userRecord struct {
+	UserID    core.UserID `json:"user_id"`
+	FirstName string      `json:"first_name"`
+	LastName  string      `json:"last_name"`
+}
+
 type storage struct {
 	Chats          []chatRecord          `json:"chats"`
 	Reviewers      []reviewerRecord      `json:"reviewers"`
 	Reviews        []reviewRecord        `json:"reviews"`
 	ReviewMessages []reviewMessageRecord `json:"review_messages"`
+	Users          []userRecord          `json:"users"`
 	NextReviewerID int64                 `json:"next_reviewer_id"`
 	NextReviewID   int64                 `json:"next_review_id"`
 }
@@ -149,12 +156,21 @@ func (r *repositoryImpl) GetReviewers(_ context.Context, chatID core.ChatID) ([]
 		return nil, err
 	}
 
+	userNames := make(map[core.UserID]userRecord)
+	for _, u := range s.Users {
+		userNames[u.UserID] = u
+	}
+
 	var reviewers []core.Reviewer
 	for _, rec := range s.Reviewers {
 		if rec.ChatID != chatID || rec.IsDeleted {
 			continue
 		}
 		rev := core.Reviewer{ID: rec.ID, UserID: rec.UserID, ChatID: rec.ChatID, Weight: rec.Weight}
+		if u, ok := userNames[rec.UserID]; ok {
+			rev.FirstName = u.FirstName
+			rev.LastName = u.LastName
+		}
 		if rec.FreezeTime != nil {
 			rev.FreezeTime = *rec.FreezeTime
 		}
@@ -416,6 +432,26 @@ func (r *repositoryImpl) GetAvailableReviewers(_ context.Context, reviewID core.
 	return reviewers, nil
 }
 
+func (r *repositoryImpl) SaveUser(_ context.Context, userID core.UserID, firstName, lastName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, err := r.load()
+	if err != nil {
+		return err
+	}
+
+	for i, u := range s.Users {
+		if u.UserID == userID {
+			s.Users[i].FirstName = firstName
+			s.Users[i].LastName = lastName
+			return r.save(s)
+		}
+	}
+	s.Users = append(s.Users, userRecord{UserID: userID, FirstName: firstName, LastName: lastName})
+	return r.save(s)
+}
+
 func (r *repositoryImpl) GetStats(_ context.Context, chatID core.ChatID) (core.ChatStats, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -423,6 +459,11 @@ func (r *repositoryImpl) GetStats(_ context.Context, chatID core.ChatID) (core.C
 	s, err := r.load()
 	if err != nil {
 		return core.ChatStats{}, err
+	}
+
+	userNames := make(map[core.UserID]userRecord)
+	for _, u := range s.Users {
+		userNames[u.UserID] = u
 	}
 
 	reviewerChat := make(map[core.ReviewerID]core.ChatID)
@@ -448,7 +489,12 @@ func (r *repositoryImpl) GetStats(_ context.Context, chatID core.ChatID) (core.C
 
 	var authors []core.AuthorStats
 	for userID, mrs := range authorMRs {
-		authors = append(authors, core.AuthorStats{UserID: userID, MRs: mrs})
+		a := core.AuthorStats{UserID: userID, MRs: mrs}
+		if u, ok := userNames[userID]; ok {
+			a.FirstName = u.FirstName
+			a.LastName = u.LastName
+		}
+		authors = append(authors, a)
 	}
 	slices.SortFunc(authors, func(a, b core.AuthorStats) int {
 		if c := cmp.Compare(b.MRs, a.MRs); c != 0 {
@@ -459,7 +505,13 @@ func (r *repositoryImpl) GetStats(_ context.Context, chatID core.ChatID) (core.C
 
 	var reviewers []core.ReviewerStats
 	for reviewerID, reviews := range reviewerReviews {
-		reviewers = append(reviewers, core.ReviewerStats{UserID: reviewerUser[reviewerID], Reviews: reviews})
+		uid := reviewerUser[reviewerID]
+		rs := core.ReviewerStats{UserID: uid, Reviews: reviews}
+		if u, ok := userNames[uid]; ok {
+			rs.FirstName = u.FirstName
+			rs.LastName = u.LastName
+		}
+		reviewers = append(reviewers, rs)
 	}
 	slices.SortFunc(reviewers, func(a, b core.ReviewerStats) int {
 		if c := cmp.Compare(b.Reviews, a.Reviews); c != 0 {
