@@ -336,8 +336,11 @@ func (r *repositoryImpl) ResetWeights(ctx context.Context) error {
 
 func (r *repositoryImpl) GetReviewers(ctx context.Context, chatID core.ChatID) ([]core.Reviewer, error) {
 	const query = `
-		SELECT reviewer_id, user_id, weight, freeze_time FROM reviewers
-		WHERE chat_id = $1 AND is_deleted = FALSE
+		SELECT r.reviewer_id, r.user_id, r.weight, r.freeze_time,
+		       u.first_name, u.last_name
+		FROM reviewers r
+		LEFT JOIN users u ON u.user_id = r.user_id
+		WHERE r.chat_id = $1 AND r.is_deleted = FALSE
 	`
 	rows, err := r.db.QueryContext(ctx, query, chatID)
 	if err != nil {
@@ -353,14 +356,31 @@ func (r *repositoryImpl) GetReviewers(ctx context.Context, chatID core.ChatID) (
 	for rows.Next() {
 		var rev core.Reviewer
 		var freezeTime sql.NullTime
-		if err := rows.Scan(&rev.ID, &rev.UserID, &rev.Weight, &freezeTime); err != nil {
+		var firstName, lastName sql.NullString
+		if err := rows.Scan(&rev.ID, &rev.UserID, &rev.Weight, &freezeTime, &firstName, &lastName); err != nil {
 			return nil, fmt.Errorf("scan reviewer: %w", err)
 		}
 		rev.ChatID = chatID
 		rev.FreezeTime = freezeTime.Time
+		rev.FirstName = firstName.String
+		rev.LastName = lastName.String
 		reviewers = append(reviewers, rev)
 	}
 	return reviewers, rows.Err()
+}
+
+func (r *repositoryImpl) SaveUser(ctx context.Context, userID core.UserID, firstName, lastName string) error {
+	const query = `
+		INSERT INTO users (user_id, first_name, last_name)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id) DO UPDATE
+			SET first_name = EXCLUDED.first_name,
+			    last_name = EXCLUDED.last_name
+	`
+	if _, err := r.db.ExecContext(ctx, query, userID, firstName, lastName); err != nil {
+		return fmt.Errorf("save user: %w", err)
+	}
+	return nil
 }
 
 func (r *repositoryImpl) GetStats(ctx context.Context, chatID core.ChatID) (core.ChatStats, error) {
@@ -380,11 +400,12 @@ func (r *repositoryImpl) GetStats(ctx context.Context, chatID core.ChatID) (core
 	}
 
 	const authorsQuery = `
-		SELECT rev.owner_id, COUNT(*) AS mrs
+		SELECT rev.owner_id, u.first_name, u.last_name, COUNT(*) AS mrs
 		FROM reviews rev
 		JOIN reviewers r ON r.reviewer_id = rev.reviewer_id
+		LEFT JOIN users u ON u.user_id = rev.owner_id
 		WHERE r.chat_id = $1
-		GROUP BY rev.owner_id
+		GROUP BY rev.owner_id, u.first_name, u.last_name
 		ORDER BY mrs DESC
 	`
 	authorRows, err := r.db.QueryContext(ctx, authorsQuery, chatID)
@@ -400,9 +421,12 @@ func (r *repositoryImpl) GetStats(ctx context.Context, chatID core.ChatID) (core
 	var authors []core.AuthorStats
 	for authorRows.Next() {
 		var a core.AuthorStats
-		if err := authorRows.Scan(&a.UserID, &a.MRs); err != nil {
+		var firstName, lastName sql.NullString
+		if err := authorRows.Scan(&a.UserID, &firstName, &lastName, &a.MRs); err != nil {
 			return core.ChatStats{}, fmt.Errorf("scan author: %w", err)
 		}
+		a.FirstName = firstName.String
+		a.LastName = lastName.String
 		authors = append(authors, a)
 	}
 	if err := authorRows.Err(); err != nil {
@@ -410,11 +434,12 @@ func (r *repositoryImpl) GetStats(ctx context.Context, chatID core.ChatID) (core
 	}
 
 	const reviewersQuery = `
-		SELECT r.user_id, COUNT(rev.review_id) AS reviews
+		SELECT r.user_id, u.first_name, u.last_name, COUNT(rev.review_id) AS reviews
 		FROM reviewers r
 		JOIN reviews rev ON rev.reviewer_id = r.reviewer_id
+		LEFT JOIN users u ON u.user_id = r.user_id
 		WHERE r.chat_id = $1
-		GROUP BY r.user_id
+		GROUP BY r.user_id, u.first_name, u.last_name
 		ORDER BY reviews DESC
 	`
 	reviewerRows, err := r.db.QueryContext(ctx, reviewersQuery, chatID)
@@ -430,9 +455,12 @@ func (r *repositoryImpl) GetStats(ctx context.Context, chatID core.ChatID) (core
 	var reviewers []core.ReviewerStats
 	for reviewerRows.Next() {
 		var rs core.ReviewerStats
-		if err := reviewerRows.Scan(&rs.UserID, &rs.Reviews); err != nil {
+		var firstName, lastName sql.NullString
+		if err := reviewerRows.Scan(&rs.UserID, &firstName, &lastName, &rs.Reviews); err != nil {
 			return core.ChatStats{}, fmt.Errorf("scan reviewer: %w", err)
 		}
+		rs.FirstName = firstName.String
+		rs.LastName = lastName.String
 		reviewers = append(reviewers, rs)
 	}
 	if err := reviewerRows.Err(); err != nil {

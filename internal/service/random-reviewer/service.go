@@ -109,6 +109,10 @@ func (s *serviceImpl) GetStats(ctx context.Context, chatID core.ChatID) (core.Ch
 	return s.repository.GetStats(ctx, chatID)
 }
 
+func (s *serviceImpl) SaveUser(ctx context.Context, userID core.UserID, firstName, lastName string) error {
+	return s.repository.SaveUser(ctx, userID, firstName, lastName)
+}
+
 func (s *serviceImpl) Reset(ctx context.Context) {
 	ticker := time.NewTicker(12 * time.Hour)
 	defer ticker.Stop()

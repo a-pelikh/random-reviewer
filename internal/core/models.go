@@ -14,6 +14,8 @@ type Reviewer struct {
 	ID         ReviewerID
 	UserID     UserID
 	ChatID     ChatID
+	FirstName  string
+	LastName   string
 	Weight     int
 	FreezeTime time.Time
 	IsDeleted  bool
@@ -40,13 +42,17 @@ type Chat struct {
 }
 
 type AuthorStats struct {
-	UserID UserID
-	MRs    int
+	UserID    UserID
+	FirstName string
+	LastName  string
+	MRs       int
 }
 
 type ReviewerStats struct {
-	UserID  UserID
-	Reviews int
+	UserID    UserID
+	FirstName string
+	LastName  string
+	Reviews   int
 }
 
 type ChatStats struct {
