@@ -171,6 +171,9 @@ func reply(message *botgolang.Message, text string) error {
 
 func (b *Bot) Start() {
 	for update := range b.bot.GetUpdatesChannel(b.ctx) {
+		if update.Type != botgolang.NEW_MESSAGE {
+			continue
+		}
 		if slices.ContainsFunc(update.Payload.Parts, matchPartTypeWithBotUserIDMention(b.bot.Info.ID)) {
 			if err := b.matchCommand(update.Payload); err != nil {
 				slog.Error("match command", "payload", update.Payload, "error", err)
