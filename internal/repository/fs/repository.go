@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultResetDays = 14
-	cleanAfter       = 3 * 30 * 24 * time.Hour
+	cleanAfter       = 1 * 31 * 24 * time.Hour
 )
 
 type chatRecord struct {

@@ -131,6 +131,10 @@ func (s *serviceImpl) Reset(ctx context.Context) {
 }
 
 func (s *serviceImpl) Clean(ctx context.Context) {
+	if err := s.repository.Clean(ctx); err != nil {
+		slog.Error("clean error", slog.String("error", err.Error()))
+	}
+
 	ticker := time.NewTicker(time.Hour * 24)
 	defer ticker.Stop()
 	for {

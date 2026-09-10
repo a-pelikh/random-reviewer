@@ -249,7 +249,7 @@ func (r *repositoryImpl) Clean(ctx context.Context) error {
 	const query = `
 		WITH due_reviews AS (
 			SELECT review_id FROM reviews
-			WHERE created_at <= NOW() - INTERVAL '3 months'
+			WHERE created_at <= NOW() - INTERVAL '1 months'
 		),
 		del_messages AS (
 			DELETE FROM reviews_messages
